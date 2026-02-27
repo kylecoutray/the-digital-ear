@@ -1,0 +1,1 @@
+# this script marks /src as a package and allows us to import from it in main.py in older versions of python
