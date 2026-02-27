@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations # for forwawrd type references... good practice
+
+#import helper modules from src/
 from src.audio_io import probe_sample_rate, stream_m4a_blocks_ffmpeg
 from src.perf import PerfLogger
+from src.preprocess import Preprocessor, rms
 
 import argparse, os, sys, time
 from dataclasses import dataclass
-
-import psutil #read process memory
 import numpy as np 
-import subprocess
-import json
+
 
 
 @dataclass(frozen=True) #immutable class
@@ -18,6 +18,9 @@ class Args:
     out_path: str
     block_size: int
     target_sr: int
+    dc_fc: float
+    hp_fc: float
+    lp_fc: float
     debug: bool
 
 def parse_args(argv: list[str]) -> Args:
@@ -29,6 +32,9 @@ def parse_args(argv: list[str]) -> Args:
     p.add_argument("--out", dest="out_path", required=True, help="Output MIDI file (.mid)")
     p.add_argument("--block", dest="block_size", type=int, default=2048, help="Max block size (samples)")
     p.add_argument("--sr", dest = "target_sr", type=int, default=44100, help="Target decode sample rate in Hz. Default 44100.")
+    p.add_argument("--dc", dest="dc_fc", type=float, default=30.0, help="DC blocker cutoff Hz")
+    p.add_argument("--hp", dest="hp_fc", type=float, default=70.0, help="High-pass cutoff Hz")
+    p.add_argument("--lp", dest="lp_fc", type=float, default=1200.0, help="Low-pass cutoff Hz")
     p.add_argument("--debug", action="store_true", help="Print extra debug info")
 
     ns = p.parse_args(argv)
@@ -50,6 +56,9 @@ def parse_args(argv: list[str]) -> Args:
         out_path=ns.out_path,
         block_size=ns.block_size,
         target_sr=ns.target_sr,
+        dc_fc=ns.dc_fc,
+        hp_fc=ns.hp_fc,
+        lp_fc=ns.lp_fc,
         debug=ns.debug,
     )
 
@@ -74,6 +83,10 @@ def main(argv: list[str]) -> int:
     input_sr = probe_sample_rate(args.in_path)
     out_sr, blocks = stream_m4a_blocks_ffmpeg(args.in_path, args.block_size, target_sr=args.target_sr)
 
+    # instantiate the preprocessor
+    pre = Preprocessor(fs=float(out_sr), dc_fc=args.dc_fc, hp_fc=args.hp_fc, lp_fc=args.lp_fc)
+
+
     block_count = 0
     max_len_seen = 0
     total_samples = 0
@@ -89,7 +102,17 @@ def main(argv: list[str]) -> int:
         # Acceptance check
         assert n <= args.block_size, f"Block too large: {n} > {args.block_size}"
 
-        #no DSP yet for this stage! nothing w/ blk beyond this point.
+        # begin preprocessing
+        if args.debug and block_count <= 5:
+            mean_in = float(np.mean(blk)) if blk.size else 0.0
+            rms_in = rms(blk)
+
+        y = pre.process(blk)
+
+        if args.debug and block_count <= 5: #only first 5 blocks to avoid huge logs
+            mean_out = float(np.mean(y)) if y.size else 0.0
+            rms_out = rms(y)
+            print(f"DBG_BLOCK={block_count} N={n} MEAN_IN={mean_in:.6e} MEAN_OUT={mean_out:.6e} RMS_IN={rms_in:.6f} RMS_OUT={rms_out:.6f}")
 
     # Still create a placeholder output file for now
     touch_output_file(args.out_path)

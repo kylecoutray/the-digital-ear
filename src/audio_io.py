@@ -40,8 +40,7 @@ def stream_m4a_blocks_ffmpeg(
     Output blocks are float32 in [-1, 1], length <= block_size.
     Returns (output_sample_rate, iterator).
     """
-    
-    import typing
+
 
     cmd = [
         "ffmpeg",
@@ -49,7 +48,7 @@ def stream_m4a_blocks_ffmpeg(
         "-i", in_path,
         "-f", "s16le",          # raw 16-bit PCM
         "-acodec", "pcm_s16le",
-        "-ac", "1",             # mono
+        "-ac", "1",             # mono -> "audio channel -> 1" forces to mono
         "-ar", str(target_sr),  # resample to known SR
         "pipe:1",
     ]

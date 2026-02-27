@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import time
-import psutil
+import psutil #read process memory
 
 # timing / memory helper 
 
