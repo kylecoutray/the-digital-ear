@@ -25,7 +25,15 @@ def parse_args(argv: list[str]) -> Args:
 
     ns = p.parse_args(argv)
 
-    # add failsafe checks for inpts
+    # added failsafe checks for inpts
+    if ns.block_size <= 0:
+        raise SystemExit("ERROR: --block must be positive.")
+    if ns.block_size > 2048:
+        raise SystemExit("ERROR: --block must be <= 2048.")
+    if not os.path.exists(ns.in_path):
+        raise SystemExit(f"ERROR: input file not found: {ns.in_path}")
+    if not ns.out_path.lower().endswith(".mid"):
+        raise SystemExit("ERROR: --out must end with .mid")
     
     return Args(
         in_path=ns.in_path,
