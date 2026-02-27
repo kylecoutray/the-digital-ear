@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations # for forwawrd type references... good practice
 
-#import helper modules from src/
-from src.audio_io import probe_sample_rate, stream_m4a_blocks_ffmpeg
-from src.perf import PerfLogger
-from src.preprocess import Preprocessor, rms
+#import helper modules from digital_ear/
+from digital_ear.audio_io import probe_sample_rate, stream_m4a_blocks_ffmpeg
+from digital_ear.perf import PerfLogger
+from digital_ear.preprocess import Preprocessor, rms
+from digital_ear.features import FrameExtractor, hann_window, rfft_mag, bin_freq
 
 import argparse, os, sys, time
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ class Args:
     dc_fc: float
     hp_fc: float
     lp_fc: float
+    n_fft: int
+    hop: int
     debug: bool
 
 def parse_args(argv: list[str]) -> Args:
@@ -35,6 +38,8 @@ def parse_args(argv: list[str]) -> Args:
     p.add_argument("--dc", dest="dc_fc", type=float, default=30.0, help="DC blocker cutoff Hz")
     p.add_argument("--hp", dest="hp_fc", type=float, default=70.0, help="High-pass cutoff Hz")
     p.add_argument("--lp", dest="lp_fc", type=float, default=1200.0, help="Low-pass cutoff Hz")
+    p.add_argument("--nfft", dest="n_fft", type=int, default=2048, help="FFT size (analysis frame length)")
+    p.add_argument("--hop", dest="hop", type=int, default=2048, help="Hop size (samples between frames)")
     p.add_argument("--debug", action="store_true", help="Print extra debug info")
 
     ns = p.parse_args(argv)
@@ -51,6 +56,15 @@ def parse_args(argv: list[str]) -> Args:
     if not ns.out_path.lower().endswith(".mid"):
         raise SystemExit("ERROR: --out must end with .mid")
     
+    if ns.n_fft <= 0:
+        raise SystemExit("ERROR: --nfft must be positive.")
+    if ns.hop <= 0:
+        raise SystemExit("ERROR: --hop must be positive.")
+    if ns.hop > ns.n_fft:
+        raise SystemExit("ERROR: --hop must be <= --nfft.")
+    if ns.n_fft > 2048:
+        raise SystemExit("ERROR: --nfft must be <= 2048 for this qualifier MVP.")
+    
     return Args(
         in_path=ns.in_path,
         out_path=ns.out_path,
@@ -59,6 +73,8 @@ def parse_args(argv: list[str]) -> Args:
         dc_fc=ns.dc_fc,
         hp_fc=ns.hp_fc,
         lp_fc=ns.lp_fc,
+        n_fft=ns.n_fft,
+        hop=ns.hop,
         debug=ns.debug,
     )
 
@@ -86,6 +102,10 @@ def main(argv: list[str]) -> int:
     # instantiate the preprocessor
     pre = Preprocessor(fs=float(out_sr), dc_fc=args.dc_fc, hp_fc=args.hp_fc, lp_fc=args.lp_fc)
 
+    # iteration 3 addition: frame extractor + window
+    fx = FrameExtractor(n_fft=args.n_fft, hop=args.hop)
+    win = hann_window(args.n_fft)
+    frame_count = 0
 
     block_count = 0
     max_len_seen = 0
@@ -102,17 +122,36 @@ def main(argv: list[str]) -> int:
         # Acceptance check
         assert n <= args.block_size, f"Block too large: {n} > {args.block_size}"
 
-        # begin preprocessing
+        #Debug stats before preprocessing, only for first 5 blocks to avoid huge logs.
         if args.debug and block_count <= 5:
             mean_in = float(np.mean(blk)) if blk.size else 0.0
             rms_in = rms(blk)
 
+        # begin preprocessing (iteration 2)
         y = pre.process(blk)
 
+        #debug stats after preprocessing
         if args.debug and block_count <= 5: #only first 5 blocks to avoid huge logs
             mean_out = float(np.mean(y)) if y.size else 0.0
             rms_out = rms(y)
             print(f"DBG_BLOCK={block_count} N={n} MEAN_IN={mean_in:.6e} MEAN_OUT={mean_out:.6e} RMS_IN={rms_in:.6f} RMS_OUT={rms_out:.6f}")
+
+
+        #iteration 3: push into frame extractor and computer FFT mag for each frame
+        for frame in fx.push(y):
+            mag = rfft_mag(frame, win)
+            
+            # Print a few peak bins to verify mapping (first 3 frames only)
+            if args.debug and frame_count < 3:
+                mag_dbg = mag.copy()
+                mag_dbg[0] = 0.0  # zero out DC bin for clearer debug
+                k_peak = int(np.argmax(mag_dbg))
+                f_peak = bin_freq(k_peak, float(out_sr), args.n_fft)
+                print(f"DBG_FRAME={frame_count} PEAK_BIN={k_peak} PEAK_HZ={f_peak:.2f}")
+
+            frame_count += 1
+
+
 
     # Still create a placeholder output file for now
     touch_output_file(args.out_path)
@@ -135,6 +174,7 @@ def main(argv: list[str]) -> int:
     print(f"BLOCKS_PROCESSED={block_count}")
     print(f"MAX_BLOCK_LEN={max_len_seen}")
     print(f"TOTAL_SAMPLES={total_samples}")
+    print(f"FRAMES_PROCESSED={frame_count}")
 
     print(f"ELAPSED_SEC={elapsed_s:.6f}")
     print(f"PEAK_RSS_MB={peak_mb:.2f}")
