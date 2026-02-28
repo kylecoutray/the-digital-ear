@@ -8,7 +8,6 @@ from digital_ear.preprocess import Preprocessor, rms
 from digital_ear.features import FrameExtractor, hann_window, rfft_mag
 from digital_ear.pitch import HPSPitchDetector
 from digital_ear.voicing import VoicingGate
-from digital_ear.note_tracker import NoteTracker
 
 import argparse, os, sys, time
 from dataclasses import dataclass
@@ -32,11 +31,6 @@ class Args:
     conf_th: float
     rms_th: float
     dump_frames: str
-    n_on: int
-    n_off: int
-    min_dur: float
-    max_events: int
-
     debug: bool
 
 def parse_args(argv: list[str]) -> Args:
@@ -58,12 +52,6 @@ def parse_args(argv: list[str]) -> Args:
     p.add_argument("--conf-th", type=float, default=3.0, help="Confidence threshold for voiced frames")
     p.add_argument("--rms-th", type=float, default=1e-3, help="RMS threshold for voiced frames")
     p.add_argument("--dump-frames", type=str, default="", help="Optional CSV path to dump per-frame (debug)")
-    p.add_argument("--n-on", type=int, default=3, help="Frames to confirm note-on")
-    p.add_argument("--n-off", type=int, default=3, help="Frames to confirm note-off")
-    p.add_argument("--min-dur", type=float, default=0.05, help="Minimum note duration (sec)")
-    p.add_argument("--max-events", type=int, default=50, help="Print up to this many events in debug")
-
-
     p.add_argument("--debug", action="store_true", help="Print extra debug info")
 
     ns = p.parse_args(argv)
@@ -96,13 +84,6 @@ def parse_args(argv: list[str]) -> Args:
     if ns.rms_th < 0:
         raise SystemExit("ERROR: --rms-th must be >= 0.")
     
-    if ns.n_on <= 0 or ns.n_off <= 0:
-        raise SystemExit("ERROR: --n-on and --n-off must be positive.")
-    if ns.min_dur < 0:
-        raise SystemExit("ERROR: --min-dur must be >= 0.")
-    if ns.max_events < 0:
-        raise SystemExit("ERROR: --max-events must be >= 0.")
-    
     return Args(
         in_path=ns.in_path,
         out_path=ns.out_path,
@@ -118,10 +99,6 @@ def parse_args(argv: list[str]) -> Args:
         conf_th=ns.conf_th,
         rms_th=ns.rms_th,
         dump_frames=ns.dump_frames,
-        n_on=ns.n_on,
-        n_off=ns.n_off,
-        min_dur=ns.min_dur,
-        max_events=ns.max_events,
         debug=ns.debug,
     )
 
@@ -156,10 +133,6 @@ def main(argv: list[str]) -> int:
 
     gate = VoicingGate(conf_threshold=args.conf_th, rms_threshold=args.rms_th)
     stream_sample_index = 0  # absolute index of current block start in decoded stream
-
-    #iteration 6
-    tracker = NoteTracker(n_on=args.n_on, n_off=args.n_off, min_dur=args.min_dur)
-    printed = 0
 
     csv_f = None
     if args.dump_frames:
@@ -208,13 +181,6 @@ def main(argv: list[str]) -> int:
 
             t_sec = frame_start / float(out_sr)
 
-            events = tracker.update(t_sec, f0_gated)
-
-            for ev in events:
-                if args.debug and printed < args.max_events:
-                    print(f"NOTE t_on={ev.t_on:.3f} t_off={ev.t_off:.3f} dur={ev.dur:.3f} note={ev.note}")
-                    printed += 1
-
             if args.debug and frame_count < 20:
                 if voiced:
                     print(f"DBG_VOICE frame={frame_count} t={t_sec:.3f} f0={f0_gated:.2f} conf={conf:.2f} rms={frame_rms:.4f}")
@@ -227,14 +193,9 @@ def main(argv: list[str]) -> int:
 
             frame_count += 1
         
-
         stream_sample_index += n #update once per block 
 
-    t_end = total_samples / float(out_sr)
-    for ev in tracker.flush(t_end):
-        if args.debug and printed < args.max_events:
-            print(f"NOTE t_on={ev.t_on:.3f} t_off={ev.t_off:.3f} dur={ev.dur:.3f} note={ev.note}")
-            printed += 1
+
 
     # Still create a placeholder output file for now
     touch_output_file(args.out_path)
