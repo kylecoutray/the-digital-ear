@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-from __future__ import annotations # for forwawrd type references... good practice
+from __future__ import annotations # for forwawrd type references
 
 #import helper modules from digital_ear/
 from digital_ear.audio_io import probe_sample_rate, stream_m4a_blocks_ffmpeg
 from digital_ear.perf import PerfLogger
 from digital_ear.preprocess import Preprocessor, rms
-from digital_ear.features import FrameExtractor, hann_window, rfft_mag, bin_freq
+from digital_ear.features import FrameExtractor, hann_window, rfft_mag
+from digital_ear.pitch import HPSPitchDetector
+from digital_ear.voicing import VoicingGate
 
 import argparse, os, sys, time
 from dataclasses import dataclass
@@ -24,6 +26,11 @@ class Args:
     lp_fc: float
     n_fft: int
     hop: int
+    fmin: float
+    fmax: float
+    conf_th: float
+    rms_th: float
+    dump_frames: str
     debug: bool
 
 def parse_args(argv: list[str]) -> Args:
@@ -40,6 +47,11 @@ def parse_args(argv: list[str]) -> Args:
     p.add_argument("--lp", dest="lp_fc", type=float, default=1200.0, help="Low-pass cutoff Hz")
     p.add_argument("--nfft", dest="n_fft", type=int, default=2048, help="FFT size (analysis frame length)")
     p.add_argument("--hop", dest="hop", type=int, default=2048, help="Hop size (samples between frames)")
+    p.add_argument("--fmin", type=float, default=80.0, help="Min f0 search (Hz)")
+    p.add_argument("--fmax", type=float, default=1000.0, help="Max f0 search (Hz)")
+    p.add_argument("--conf-th", type=float, default=3.0, help="Confidence threshold for voiced frames")
+    p.add_argument("--rms-th", type=float, default=1e-3, help="RMS threshold for voiced frames")
+    p.add_argument("--dump-frames", type=str, default="", help="Optional CSV path to dump per-frame (debug)")
     p.add_argument("--debug", action="store_true", help="Print extra debug info")
 
     ns = p.parse_args(argv)
@@ -64,6 +76,13 @@ def parse_args(argv: list[str]) -> Args:
         raise SystemExit("ERROR: --hop must be <= --nfft.")
     if ns.n_fft > 2048:
         raise SystemExit("ERROR: --nfft must be <= 2048 for this qualifier MVP.")
+    if ns.fmin <= 0 or ns.fmax <= 0 or ns.fmax <= ns.fmin:
+        raise SystemExit("ERROR: require 0 < --fmin < --fmax.")
+    
+    if ns.conf_th <= 0:
+        raise SystemExit("ERROR: --conf-th must be positive.")
+    if ns.rms_th < 0:
+        raise SystemExit("ERROR: --rms-th must be >= 0.")
     
     return Args(
         in_path=ns.in_path,
@@ -75,6 +94,11 @@ def parse_args(argv: list[str]) -> Args:
         lp_fc=ns.lp_fc,
         n_fft=ns.n_fft,
         hop=ns.hop,
+        fmin=ns.fmin,
+        fmax=ns.fmax,
+        conf_th=ns.conf_th,
+        rms_th=ns.rms_th,
+        dump_frames=ns.dump_frames,
         debug=ns.debug,
     )
 
@@ -105,6 +129,16 @@ def main(argv: list[str]) -> int:
     # iteration 3 addition: frame extractor + window
     fx = FrameExtractor(n_fft=args.n_fft, hop=args.hop)
     win = hann_window(args.n_fft)
+    det = HPSPitchDetector(sr=float(out_sr), n_fft=args.n_fft, fmin=args.fmin, fmax=args.fmax)
+
+    gate = VoicingGate(conf_threshold=args.conf_th, rms_threshold=args.rms_th)
+    stream_sample_index = 0  # absolute index of current block start in decoded stream
+
+    csv_f = None
+    if args.dump_frames:
+        csv_f = open(args.dump_frames, "w", encoding="utf-8")
+        csv_f.write("frame_idx,time_sec,f0_hz,conf,rms,voiced\n")
+
     frame_count = 0
 
     block_count = 0
@@ -138,18 +172,28 @@ def main(argv: list[str]) -> int:
 
 
         #iteration 3: push into frame extractor and computer FFT mag for each frame
-        for frame in fx.push(y):
+        for frame, frame_start in fx.push_indexed(y, stream_sample_index):
             mag = rfft_mag(frame, win)
-            
-            # Print a few peak bins to verify mapping (first 3 frames only)
-            if args.debug and frame_count < 3:
-                mag_dbg = mag.copy()
-                mag_dbg[0] = 0.0  # zero out DC bin for clearer debug
-                k_peak = int(np.argmax(mag_dbg))
-                f_peak = bin_freq(k_peak, float(out_sr), args.n_fft)
-                print(f"DBG_FRAME={frame_count} PEAK_BIN={k_peak} PEAK_HZ={f_peak:.2f}")
+            f0, conf = det.estimate(mag)
+
+            frame_rms = rms(frame)
+            f0_gated, voiced = gate.apply(f0, conf, frame_rms)
+
+            t_sec = frame_start / float(out_sr)
+
+            if args.debug and frame_count < 20:
+                if voiced:
+                    print(f"DBG_VOICE frame={frame_count} t={t_sec:.3f} f0={f0_gated:.2f} conf={conf:.2f} rms={frame_rms:.4f}")
+                else:
+                    print(f"DBG_VOICE frame={frame_count} t={t_sec:.3f} f0=None conf={conf:.2f} rms={frame_rms:.4f}")
+
+            if csv_f is not None:
+                f0_val = "" if f0_gated is None else f"{f0_gated:.6f}"
+                csv_f.write(f"{frame_count},{t_sec:.6f},{f0_val},{conf:.6f},{frame_rms:.6f},{int(voiced)}\n")
 
             frame_count += 1
+        
+        stream_sample_index += n #update once per block 
 
 
 
@@ -181,6 +225,9 @@ def main(argv: list[str]) -> int:
 
     if args.debug:
         print("STATUS=OK (this is where future iterations will report more detailed status)")
+
+    if csv_f is not None:
+        csv_f.close()
 
     return 0
 

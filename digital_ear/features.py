@@ -51,6 +51,8 @@ class FrameExtractor:
         self._buf = np.zeros(self.n_fft, dtype=np.float32)
         self._fill = 0
 
+
+    #unneeded since we have the new push_indexed method, but leaving for now since it's used in tests and main.py iteration 2
     def push(self, x: np.ndarray):
         """
         x: float32 samples
@@ -80,6 +82,46 @@ class FrameExtractor:
                 # shift left by hop
                 if self.hop == self.n_fft:
                     # no overlap: reset buffer
+                    self._fill = 0
+                else:
+                    remain = self.n_fft - self.hop
+                    self._buf[:remain] = self._buf[self.hop:]
+                    self._fill = remain
+
+    def push_indexed(self, x: np.ndarray, start_sample: int):
+        """
+        Like push(), but yields (frame, frame_start_sample_index).
+
+        start_sample: absolute sample index of x[0] in the overall stream.
+        """
+        if x.size == 0:
+            return
+        x = x.astype(np.float32, copy=False)
+
+        idx = 0
+        n = x.shape[0]
+
+        # This tracks where we are in absolute samples as we copy x into the internal buffer.
+        abs_pos = start_sample
+
+        while idx < n:
+            space = self.n_fft - self._fill
+            take = min(space, n - idx)
+
+            self._buf[self._fill:self._fill + take] = x[idx:idx + take]
+            self._fill += take
+
+            idx += take
+            abs_pos += take
+
+            while self._fill == self.n_fft:
+                frame = self._buf.copy()
+
+                # abs_pos is the absolute index right after the last sample copied in
+                frame_start = abs_pos - self.n_fft
+                yield frame, frame_start
+
+                if self.hop == self.n_fft:
                     self._fill = 0
                 else:
                     remain = self.n_fft - self.hop
