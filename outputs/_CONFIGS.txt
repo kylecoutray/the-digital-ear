@@ -1,0 +1,108 @@
+──────────────────────────────────────────────────
+  2026-03-01 18:40:01
+  Input:   Input 4.m4a
+  Output:  output4_mono.mid
+
+  Parameter Overrides:
+    Confidence Threshold       5.0  (default 7.0)
+  Flags:   Debug, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 18:40:28
+  Input:   Input 4.m4a
+  Output:  output4_poly.mid
+
+  Parameter Overrides:
+    Confidence Threshold       5.0  (default 7.0)
+  Flags:   Debug, Polyphonic Mode, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 20:04:39
+  Input:   Input 3.m4a
+  Output:  output3_mono.mid
+
+  Parameter Overrides:
+    Minimum Frequency          70.0 Hz
+    Maximum Frequency        1000.0 Hz
+    Confidence Threshold       7.0
+    Minimum Note Duration      0.14 s
+  Flags:   Debug, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 20:05:20
+  Input:   Input 3.m4a
+  Output:  output3_poly.mid
+
+  Parameter Overrides:
+    Minimum Frequency          70.0 Hz
+    Maximum Frequency        1000.0 Hz
+    Confidence Threshold      17.0
+    Minimum Note Duration      0.14 s
+  Flags:   Debug, Polyphonic Mode, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 23:36:05
+  Input:   Input 2.m4a
+  Output:  output2_mono.mid
+
+  Parameter Overrides:
+    High Pass Cutoff           70.0 Hz
+    Low Pass Cutoff          2000.0 Hz
+    Hop Size                  512
+    Minimum Frequency         100.0 Hz
+    Maximum Frequency         400.0 Hz
+    Confidence Threshold        5.0
+    Minimum Note Duration       0.10 s
+  Flags:   Debug, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 23:36:30
+  Input:   Input 2.m4a
+  Output:  output2_poly.mid
+
+  Parameter Overrides:
+    High Pass Cutoff           70.0 Hz
+    Low Pass Cutoff          2000.0 Hz
+    Hop Size                  512
+    Minimum Frequency         100.0 Hz
+    Maximum Frequency         400.0 Hz
+    Confidence Threshold        5.0
+    Minimum Note Duration       0.10 s
+  Flags:   Debug, Polyphonic Mode, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 23:57:15
+  Input:   Input 1.m4a
+  Output:  output1_mono.mid
+
+  Parameter Overrides:
+    High Pass Cutoff           80.0 Hz
+    Low Pass Cutoff          2000.0 Hz
+    Minimum Frequency         120.0 Hz
+    Maximum Frequency         400.0 Hz
+    Confidence Threshold        5.0
+    RMS Threshold               0.015
+    Minimum Note Duration       0.10 s
+  Flags:   Debug, Export .wav, Dual WAV Output
+
+
+──────────────────────────────────────────────────
+  2026-03-01 23:56:45
+  Input:   Input 1.m4a
+  Output:  output1_poly.mid
+
+  Parameter Overrides:
+    High Pass Cutoff           80.0 Hz
+    Low Pass Cutoff          2000.0 Hz
+    Minimum Frequency         120.0 Hz
+    Maximum Frequency         400.0 Hz
+    Confidence Threshold        5.0
+    RMS Threshold               0.015
+    Minimum Note Duration       0.10 s
+  Flags:   Debug, Polyphonic Mode, Export .wav, Dual WAV Output
