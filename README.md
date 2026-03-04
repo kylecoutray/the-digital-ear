@@ -112,7 +112,6 @@ python gui.py
 the-digital-ear/
 ├── main.py                     # CLI entry point
 ├── gui.py                      # Tkinter GUI
-├── generate_spectrogram.py     # Spectrogram visualization tool
 │
 ├── digital_ear/
 │   ├── audio_io.py             # ffmpeg streaming decoder
@@ -131,6 +130,7 @@ the-digital-ear/
 │   └── test_tone_fft.py
 │
 └── outputs/                    # Generated MIDI, WAV, spectrograms
+└── other                       # Test scripts, misc files
 ```
 
 ---
