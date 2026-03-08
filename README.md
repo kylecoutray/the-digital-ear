@@ -127,6 +127,7 @@ the-digital-ear/
 ├── other/                      # Test scripts, spectrogram generation, etc.
 │
 └── outputs/                    # Generated MIDI, WAV, spectrograms
+└── other                       # Test scripts, misc files
 ```
 
 ---
