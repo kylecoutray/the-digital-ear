@@ -29,13 +29,8 @@ def bin_freq(k: int, sr: float, n_fft: int) -> float:
 
 @dataclass
 class FrameExtractor:
-    """
-    Streaming frame extractor with overlap support.
-    You push in blocks (any length <= block_size), and it yields frames of length n_fft
-    spaced by hop samples.
-
-    Works even if hop < block size (it will yield multiple frames per block as data accumulates).
-    """
+    """Streaming frame extractor with overlap. Push blocks in, get n_fft-length
+    frames out spaced by hop samples."""
     n_fft: int
     hop: int
     _buf: np.ndarray = None
@@ -89,11 +84,8 @@ class FrameExtractor:
                     self._fill = remain
 
     def push_indexed(self, x: np.ndarray, start_sample: int):
-        """
-        Like push(), but yields (frame, frame_start_sample_index).
-
-        start_sample: absolute sample index of x[0] in the overall stream.
-        """
+        """Like push() but yields (frame, frame_start_sample_index).
+        start_sample is the absolute sample index of x[0]."""
         if x.size == 0:
             return
         x = x.astype(np.float32, copy=False)
@@ -101,7 +93,7 @@ class FrameExtractor:
         idx = 0
         n = x.shape[0]
 
-        # This tracks where we are in absolute samples as we copy x into the internal buffer.
+        # tracks absolute sample position as we copy into internal buffer
         abs_pos = start_sample
 
         while idx < n:
@@ -117,7 +109,7 @@ class FrameExtractor:
             while self._fill == self.n_fft:
                 frame = self._buf.copy()
 
-                # abs_pos is the absolute index right after the last sample copied in
+                # abs_pos points right after the last sample we copied
                 frame_start = abs_pos - self.n_fft
                 yield frame, frame_start
 

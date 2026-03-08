@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-The Digital Ear — Lightweight GUI
-tkinter only, zero extra dependencies. Designed for Raspberry Pi.
+The Digital Ear — tkinter GUI (no extra deps).
 """
 import datetime
 import os
@@ -12,7 +11,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont
 
-# ── Paradromics colour palette ──────────────────────────────────────
+# Colour palette
 BG         = "#0a0a0a"
 BG_CARD    = "#141416"
 BG_FIELD   = "#1c1c20"
@@ -38,23 +37,22 @@ STAGE_GREEN = "#4ae54a"
 BROWSE_BG  = "#252528"
 PROG_BG    = "#1a1a1e"
 
-# Border width for gradient glow
 GLOW_PX = 14
 
-# Aura gradient palette — pumped for visibility
+# Aura gradient colours (left → right)
 AURA = [
-    (240, 140, 30),   # warm orange   (left edge)
-    (210, 100, 20),   # deep orange
-    (80,  50,  160),  # purple
-    (30,  70,  210),  # deep blue
-    (50,  100, 240),  # bright blue   (centre)
-    (70,  80,  220),  # blue
-    (140, 50,  180),  # purple-red
-    (210, 55,  65),   # crimson
-    (180, 40,  35),   # dark red      (right edge)
+    (240, 140, 30),
+    (210, 100, 20),
+    (80,  50,  160),
+    (30,  70,  210),
+    (50,  100, 240),
+    (70,  80,  220),
+    (140, 50,  180),
+    (210, 55,  65),
+    (180, 40,  35),
 ]
 
-# Progress stage mapping: stage_name → (fraction, label)
+# stage name → (fraction, label)
 STAGE_MAP = {
     "decoding":     (0.05,  "Decoding audio..."),
     "processing":   (0.10,  "Processing blocks..."),
@@ -69,20 +67,23 @@ OUTPUTS_DIR = os.path.join(PROJECT_DIR, "outputs")
 LOGO_PATH = os.path.join(PROJECT_DIR, "digital_ear", "paradromics.png")
 ICON_PATH = os.path.join(PROJECT_DIR, "digital_ear", "paradromics_icon.png")
 
-# ── Parameter definitions ───────────────────────────────────────────
+# Parameter definitions
 PARAMS = [
-    ("Sample Rate (Hz)",          "--sr",           "44100",  "Target decode sample rate"),
-    ("Block Size",                "--block",        "2048",   "Max block size in samples"),
     ("DC Cutoff (Hz)",            "--dc",           "30.0",   "DC blocker cutoff frequency"),
     ("High-pass (Hz)",            "--hp",           "60.0",   "High-pass filter cutoff"),
     ("Low-pass (Hz)",             "--lp",           "4000.0", "Low-pass filter cutoff"),
-    ("FFT Size",                  "--nfft",         "2048",   "FFT analysis frame length"),
-    ("Hop Size",                  "--hop",          "512",    "Samples between frames"),
     ("Min F0 (Hz)",               "--fmin",         "80.0",   "Min pitch search frequency"),
     ("Max F0 (Hz)",               "--fmax",         "1000.0", "Max pitch search frequency"),
     ("Confidence Threshold",      "--conf-th",      "7.0",    "Pitch confidence threshold"),
     ("RMS Threshold",             "--rms-th",       "0.003",  "RMS energy for voicing"),
     ("Min Note Duration (sec)",   "--min-note-sec", "0.15",   "Discard short notes"),
+]
+
+PARAMS_BOTTOM = [
+    ("FFT Size",                  "--nfft",         "2048",   "FFT analysis frame length"),
+    ("Hop Size",                  "--hop",          "512",    "Samples between frames"),
+    ("Sample Rate (Hz)",          "--sr",           "44100",  "Target decode sample rate"),
+    ("Block Size",                "--block",        "2048",   "Max block size in samples"),
 ]
 
 FLAG_PARAMS = [
@@ -94,9 +95,54 @@ FILE_PARAMS = [
     ("Dual WAV Output",  "--dual",        "Auto-saves stereo WAV"),
 ]
 
+# GM instruments (name, program number)
+GM_INSTRUMENTS = [
+    ("Acoustic Grand Piano", 0),
+    ("Electric Piano 1", 4),
+    ("Harpsichord", 6),
+    ("Celesta", 8),
+    ("Glockenspiel", 9),
+    ("Music Box", 10),
+    ("Vibraphone", 11),
+    ("Marimba", 12),
+    ("Xylophone", 13),
+    ("Nylon Guitar", 24),
+    ("Steel Guitar", 25),
+    ("Jazz Guitar", 26),
+    ("Clean Guitar", 27),
+    ("Muted Guitar", 28),
+    ("Overdriven Guitar", 29),
+    ("Distortion Guitar", 30),
+    ("Acoustic Bass", 32),
+    ("Fingered Bass", 33),
+    ("Violin", 40),
+    ("Viola", 41),
+    ("Cello", 42),
+    ("Strings Ensemble", 48),
+    ("Synth Strings", 50),
+    ("Choir Aahs", 52),
+    ("Trumpet", 56),
+    ("French Horn", 60),
+    ("Soprano Sax", 64),
+    ("Alto Sax", 65),
+    ("Oboe", 68),
+    ("English Horn", 69),
+    ("Bassoon", 70),
+    ("Clarinet", 71),
+    ("Piccolo", 72),
+    ("Flute", 73),
+    ("Recorder", 74),
+    ("Pan Flute", 75),
+    ("Ocarina", 79),
+    ("Square Lead", 80),
+    ("Sawtooth Lead", 81),
+    ("Warm Pad", 89),
+    ("Polysynth", 90),
+]
+
 
 def _lerp_rgb(colors, t):
-    """Interpolate through a list of (r,g,b) tuples. t in [0,1]."""
+    """Lerp through a list of RGB tuples, t in [0,1]."""
     t = max(0.0, min(1.0, t))
     n = len(colors) - 1
     idx = t * n
@@ -116,13 +162,16 @@ class App(tk.Tk):
         self.title("The Digital Ear — Paradromics")
         self.configure(bg=BG)
         self.minsize(560, 640)
-        self.geometry("660x820")
+        self.geometry("660x804")
 
         self.running = False
         self.process = None
         self.param_vars = {}
         self.flag_vars = {}
         self.file_vars = {}
+        self.melody_prog_var = None
+        self.bg_prog_var = None
+        self._cfg_canvas = None
         self._icon_img = None
         self._logo_img = None
         self._gradient_img = None
@@ -131,30 +180,29 @@ class App(tk.Tk):
 
         self._build_ui()
 
-    # ── UI ───────────────────────────────────────────────────────────
-
     def _build_ui(self):
-        self._font       = tkfont.Font(family="Helvetica Neue", size=14)
-        self._font_sm    = tkfont.Font(family="Helvetica Neue", size=13)
-        self._font_bold  = tkfont.Font(family="Helvetica Neue", size=14, weight="bold")
-        self._font_title = tkfont.Font(family="Helvetica Neue", size=18, weight="bold")
-        self._font_brand = tkfont.Font(family="PT Mono", size=13)
-        self._font_mono  = tkfont.Font(family="Menlo", size=11)
-        self._font_gen   = tkfont.Font(family="Helvetica Neue", size=15, weight="bold")
-        self._font_cfg   = tkfont.Font(family="Helvetica Neue", size=12)
+        self._font       = tkfont.Font(family="Helvetica Neue", size=15)
+        self._font_sm    = tkfont.Font(family="Helvetica Neue", size=14)
+        self._font_bold  = tkfont.Font(family="Helvetica Neue", size=15, weight="bold")
+        self._font_title = tkfont.Font(family="Helvetica Neue", size=19, weight="bold")
+        self._font_brand = tkfont.Font(family="PT Mono", size=14, weight="bold")
+        self._font_mono  = tkfont.Font(family="Menlo", size=12)
+        self._font_gen   = tkfont.Font(family="Helvetica Neue", size=16, weight="bold")
+        self._font_cfg   = tkfont.Font(family="Helvetica Neue", size=13)
+        self._font_italic = tkfont.Font(family="Helvetica Neue", size=15, slant="italic")
 
-        # ── Background gradient canvas (full window) ──
+        # background gradient canvas
         self._bg_canvas = tk.Canvas(self, highlightthickness=0, bg=BG)
         self._bg_canvas.pack(fill="both", expand=True)
         self._bg_canvas.bind("<Configure>", self._schedule_aura)
 
-        # ── Content frame (margins expose the gradient border) ──
+        # content sits inset so gradient border is visible
         content = tk.Frame(self._bg_canvas, bg=BG)
         content.pack(fill="both", expand=True,
                      padx=GLOW_PX, pady=(0, GLOW_PX))
         self._content = content
 
-        # ── Header: logo + brand ──
+        # header
         hdr = tk.Frame(content, bg=BG)
         hdr.pack(fill="x", padx=14, pady=(16, 0))
 
@@ -178,7 +226,6 @@ class App(tk.Tk):
                  font=self._font_brand, fg=FG_DIM, bg=BG).pack(
                      side="left", anchor="w")
 
-        # ── Title ──
         title_frame = tk.Frame(content, bg=BG)
         title_frame.pack(fill="x", padx=14, pady=(14, 2))
         tk.Label(title_frame, text="The Digital Ear", font=self._font_title,
@@ -188,7 +235,6 @@ class App(tk.Tk):
 
         tk.Frame(content, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(14, 0))
 
-        # ── File selection ──
         file_frame = tk.Frame(content, bg=BG, padx=14)
         file_frame.pack(fill="x", pady=(12, 0))
 
@@ -196,9 +242,8 @@ class App(tk.Tk):
         self.out_var = tk.StringVar()
         self._file_row(file_frame, "Input", self.in_var, self._browse_input, 0)
         self._file_row(file_frame, "Output", self.out_var, self._browse_output, 1,
-                       placeholder="auto from input name")
+                       placeholder=" auto from input name")
 
-        # ── Config toggle + Save Config ──
         self.config_visible = False
         self.config_frame = None
 
@@ -235,7 +280,6 @@ class App(tk.Tk):
 
         self.config_container = tk.Frame(content, bg=BG)
 
-        # ── Generate button ──
         gen_row = tk.Frame(content, bg=BG, padx=14)
         gen_row.pack(fill="x", pady=(12, 0))
 
@@ -247,7 +291,6 @@ class App(tk.Tk):
         )
         self.gen_btn.pack(fill="x")
 
-        # ── Log / output ──
         tk.Frame(content, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(12, 0))
 
         log_hdr = tk.Frame(content, bg=BG, padx=14)
@@ -277,7 +320,7 @@ class App(tk.Tk):
         self.log_text.tag_configure("err", foreground=ERR_FG)
         self.log_text.tag_configure("ok", foreground=OK_FG)
 
-        # ── Progress bar + stage label ──
+        # progress bar
         prog_frame = tk.Frame(content, bg=BG, padx=14)
         prog_frame.pack(fill="x", pady=(4, 8))
 
@@ -293,7 +336,7 @@ class App(tk.Tk):
         )
         self._stage_label.pack(fill="x", pady=(2, 0))
 
-    # ── Gradient aura ────────────────────────────────────────────────
+    # --- gradient aura ---
 
     def _schedule_aura(self, event=None):
         if self._aura_after_id is not None:
@@ -343,8 +386,6 @@ class App(tk.Tk):
         c.delete("aura")
         c.create_image(0, 0, anchor="nw", image=self._gradient_img, tags="aura")
 
-    # ── File rows ────────────────────────────────────────────────────
-
     def _file_row(self, parent, label, var, browse_cmd, row, placeholder=""):
         tk.Label(parent, text=label, font=self._font_sm, fg=FG_DIM,
                  bg=BG, width=6, anchor="w").grid(row=row, column=0,
@@ -356,23 +397,21 @@ class App(tk.Tk):
         )
         entry.grid(row=row, column=1, sticky="ew", padx=(8, 8), pady=4, ipady=3)
 
-        # Placeholder text (greyed-out hint when field is empty)
         if placeholder:
             def _on_focus_in(e, ent=entry, var=var, ph=placeholder):
                 if ent.cget("fg") == FG_DIM:
                     var.set("")
-                    ent.configure(fg=ENTRY_FG)
+                    ent.configure(fg=ENTRY_FG, font=self._font)
             def _on_focus_out(e, ent=entry, var=var, ph=placeholder):
                 if not var.get().strip():
                     var.set(ph)
-                    ent.configure(fg=FG_DIM)
+                    ent.configure(fg=FG_DIM, font=self._font_italic)
             def _on_var_change(*a, ent=entry, var=var, ph=placeholder):
                 val = var.get()
                 if val and val != ph:
-                    ent.configure(fg=ENTRY_FG)
-            # Set initial placeholder
+                    ent.configure(fg=ENTRY_FG, font=self._font)
             var.set(placeholder)
-            entry.configure(fg=FG_DIM)
+            entry.configure(fg=FG_DIM, font=self._font_italic)
             entry.bind("<FocusIn>", _on_focus_in)
             entry.bind("<FocusOut>", _on_focus_out)
             var.trace_add("write", _on_var_change)
@@ -386,20 +425,61 @@ class App(tk.Tk):
         btn.grid(row=row, column=2, pady=4)
         parent.columnconfigure(1, weight=1)
 
-    # ── Config panel ─────────────────────────────────────────────────
+    # Config panel
 
     def _build_config_panel(self):
         f = self.config_container
         f.configure(padx=14, pady=6)
 
-        inner = tk.Frame(f, bg=BG_CARD,
-                         highlightbackground=BORDER, highlightthickness=1)
-        inner.pack(fill="x")
+        # scrollable wrapper
+        scroll_frame = tk.Frame(f, bg=BG_CARD,
+                                highlightbackground=BORDER, highlightthickness=1)
+        scroll_frame.pack(fill="x")
+
+        canvas = tk.Canvas(scroll_frame, bg=BG_CARD, highlightthickness=0, bd=0)
+        scrollbar = tk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview,
+                                 bg="#333338", troughcolor="#111114",
+                                 activebackground="#4a4a52",
+                                 relief="flat", width=14)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        self._cfg_canvas = canvas
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=BG_CARD)
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Cap height at 400px
+            req_h = inner.winfo_reqheight()
+            canvas.configure(height=min(req_h, 420))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # mousewheel scroll
+        def _on_mousewheel(event):
+            canvas.yview_scroll(-1 * (event.delta // 120 or (-1 if event.delta < 0 else 1)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        scroll_frame.bind("<Enter>", _bind_mousewheel)
+        scroll_frame.bind("<Leave>", _unbind_mousewheel)
 
         pad = tk.Frame(inner, bg=BG_CARD, padx=12, pady=10)
         pad.pack(fill="x")
 
         row = 0
+
         hdr_row = tk.Frame(pad, bg=BG_CARD)
         hdr_row.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         tk.Label(hdr_row, text="Parameter Overrides", font=self._font_sm,
@@ -410,62 +490,92 @@ class App(tk.Tk):
             activeforeground=FG, relief="groove", bd=1, padx=8, pady=0,
             cursor="hand2", command=self._reset_config,
         ).pack(side="right")
+        poly_var = tk.BooleanVar(value=False)
+        self.flag_vars["--poly"] = poly_var
+        tk.Checkbutton(
+            hdr_row, text="Polyphonic Mode", variable=poly_var, font=self._font_cfg,
+            fg=FG_MUTED, bg=BG_CARD, selectcolor=BG_FIELD,
+            activebackground=BG_CARD, activeforeground=FG, anchor="w",
+        ).pack(side="right", padx=(0, 12))
         row += 1
 
-        for label, flag, default, tooltip in PARAMS:
+        def _add_param_row(parent, r, label, flag, default, tooltip):
             enabled = tk.BooleanVar(value=False)
             value = tk.StringVar(value=default)
             self.param_vars[flag] = (enabled, value)
 
             cb = tk.Checkbutton(
-                pad, text=label, variable=enabled, font=self._font_cfg,
+                parent, text=label, variable=enabled, font=self._font_cfg,
                 fg=FG_MUTED, bg=BG_CARD, selectcolor=BG_FIELD,
                 activebackground=BG_CARD, activeforeground=FG, anchor="w",
             )
-            cb.grid(row=row, column=0, sticky="w", padx=(0, 6))
+            cb.grid(row=r, column=0, sticky="w", padx=(0, 6))
 
             entry = tk.Entry(
-                pad, textvariable=value, font=self._font_cfg, width=10,
+                parent, textvariable=value, font=self._font_cfg, width=10,
                 bg=ENTRY_BG, fg=ENTRY_FG, relief="groove", bd=2,
                 insertbackground=FG, selectbackground=BORDER,
                 disabledbackground=BG_CARD, disabledforeground=FG_DIM,
                 state="disabled",
             )
-            entry.grid(row=row, column=1, sticky="w", padx=2, pady=1)
+            entry.grid(row=r, column=1, sticky="w", padx=2, pady=1)
 
-            tk.Label(pad, text=tooltip, font=self._font_cfg, fg=FG_DIM,
-                     bg=BG_CARD, anchor="w").grid(row=row, column=2,
+            tk.Label(parent, text=tooltip, font=self._font_cfg, fg=FG_DIM,
+                     bg=BG_CARD, anchor="w").grid(row=r, column=2,
                                                    sticky="w", padx=(8, 0))
 
             def _toggle(entry=entry, var=enabled):
                 entry.configure(state="normal" if var.get() else "disabled")
             enabled.trace_add("write", lambda *a, fn=_toggle: fn())
+
+        for label, flag, default, tooltip in PARAMS:
+            _add_param_row(pad, row, label, flag, default, tooltip)
             row += 1
 
         tk.Frame(pad, bg=BORDER, height=1).grid(
             row=row, column=0, columnspan=3, sticky="ew", pady=6)
         row += 1
 
-        for label, flag, tooltip in FLAG_PARAMS:
-            var = tk.BooleanVar(value=False)
-            self.flag_vars[flag] = var
-            cb = tk.Checkbutton(
-                pad, text=label, variable=var, font=self._font_cfg,
-                fg=FG_MUTED, bg=BG_CARD, selectcolor=BG_FIELD,
-                activebackground=BG_CARD, activeforeground=FG, anchor="w",
-            )
-            cb.grid(row=row, column=0, sticky="w")
-            tk.Label(pad, text=tooltip, font=self._font_cfg, fg=FG_DIM,
-                     bg=BG_CARD, anchor="w").grid(row=row, column=1,
-                                                   columnspan=2, sticky="w",
-                                                   padx=(8, 0))
-            row += 1
+        # instrument dropdowns
+        gm_names = [name for name, _prog in GM_INSTRUMENTS]
+
+        tk.Label(pad, text="Melody Instrument", font=self._font_cfg,
+                 fg=FG_MUTED, bg=BG_CARD, anchor="w").grid(
+                     row=row, column=0, sticky="w", padx=(0, 6))
+        self.melody_prog_var = tk.StringVar(value="Acoustic Grand Piano")
+        mel_menu = tk.OptionMenu(pad, self.melody_prog_var, *gm_names)
+        mel_menu.configure(
+            font=self._font_cfg, bg=BG_FIELD, fg=ENTRY_FG,
+            activebackground=BORDER, activeforeground=FG,
+            highlightthickness=0, relief="groove", bd=1,
+        )
+        mel_menu["menu"].configure(
+            bg=BG_FIELD, fg=ENTRY_FG, activebackground=ACCENT,
+            activeforeground=FG, font=self._font_cfg,
+        )
+        mel_menu.grid(row=row, column=1, columnspan=2, sticky="ew", padx=2, pady=1)
+        row += 1
+
+        tk.Label(pad, text="Background Instrument", font=self._font_cfg,
+                 fg=FG_MUTED, bg=BG_CARD, anchor="w").grid(
+                     row=row, column=0, sticky="w", padx=(0, 6))
+        self.bg_prog_var = tk.StringVar(value="Steel Guitar")
+        bg_menu = tk.OptionMenu(pad, self.bg_prog_var, *gm_names)
+        bg_menu.configure(
+            font=self._font_cfg, bg=BG_FIELD, fg=ENTRY_FG,
+            activebackground=BORDER, activeforeground=FG,
+            highlightthickness=0, relief="groove", bd=1,
+        )
+        bg_menu["menu"].configure(
+            bg=BG_FIELD, fg=ENTRY_FG, activebackground=ACCENT,
+            activeforeground=FG, font=self._font_cfg,
+        )
+        bg_menu.grid(row=row, column=1, columnspan=2, sticky="ew", padx=2, pady=1)
+        row += 1
 
         tk.Frame(pad, bg=BORDER, height=1).grid(
             row=row, column=0, columnspan=3, sticky="ew", pady=6)
         row += 1
-
-        # File-output toggles (paths auto-generated — no entry fields)
         for label, flag, tooltip in FILE_PARAMS:
             enabled = tk.BooleanVar(value=False)
             self.file_vars[flag] = (enabled, tk.StringVar(value=""))
@@ -482,6 +592,13 @@ class App(tk.Tk):
                                                    padx=(8, 0))
             row += 1
 
+        tk.Frame(pad, bg=BORDER, height=1).grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+        row += 1
+        for label, flag, default, tooltip in PARAMS_BOTTOM:
+            _add_param_row(pad, row, label, flag, default, tooltip)
+            row += 1
+
         pad.columnconfigure(2, weight=1)
         self.config_frame = inner
 
@@ -493,14 +610,16 @@ class App(tk.Tk):
         if self.config_visible:
             self.cfg_btn.configure(text="▾  Advanced Config")
             self.config_container.pack(fill="x", after=self.cfg_btn.master)
+            self.config_container.update_idletasks()
+            if self._cfg_canvas:
+                self._cfg_canvas.configure(scrollregion=self._cfg_canvas.bbox("all"))
         else:
             self.cfg_btn.configure(text="▸  Advanced Config")
             self.config_container.pack_forget()
 
     def _reset_config(self):
-        """Reset all config params to defaults, uncheck all checkboxes."""
-        # Build a quick lookup: flag → default value
-        defaults = {flag: default for _, flag, default, _ in PARAMS}
+        """Reset config to defaults."""
+        defaults = {flag: default for _, flag, default, _ in PARAMS + PARAMS_BOTTOM}
 
         for flag, (enabled, value) in self.param_vars.items():
             enabled.set(False)
@@ -513,22 +632,24 @@ class App(tk.Tk):
         for flag, (enabled, _path) in self.file_vars.items():
             enabled.set(False)
 
-        # Debug defaults to on in GUI
         self.debug_var.set(True)
         self.export_wav_var.set(False)
 
-    # ── Config snapshot ────────────────────────────────────────────
+        if self.melody_prog_var:
+            self.melody_prog_var.set("Acoustic Grand Piano")
+        if self.bg_prog_var:
+            self.bg_prog_var.set("Steel Guitar")
 
     def _save_config_readable(self):
-        """Append a human-readable config snapshot to _CONFIGS.txt."""
+        """Append config snapshot to _CONFIGS.txt."""
         config_path = os.path.join(OUTPUTS_DIR, "_CONFIGS.txt")
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Input / output names (just filenames, not full paths)
+        # just the filenames
         in_path = self.in_var.get().strip()
         in_name = os.path.basename(in_path) if in_path else "(none)"
         raw_out = self.out_var.get().strip()
-        if not raw_out or raw_out == "auto from input name":
+        if not raw_out or raw_out == " auto from input name":
             out_name = os.path.splitext(in_name)[0] if in_name != "(none)" else "output"
         else:
             out_name = raw_out
@@ -540,17 +661,16 @@ class App(tk.Tk):
         lines.append(f"  Output:  {out_name}.mid")
         lines.append(f"")
 
-        # Overridden parameters (only the ones the user actually checked)
-        label_map = {flag: label for label, flag, _d, _t in PARAMS}
-        defaults  = {flag: default for _l, flag, default, _t in PARAMS}
+        # only include checked overrides
+        _all_params = PARAMS + PARAMS_BOTTOM
+        label_map = {flag: label for label, flag, _d, _t in _all_params}
+        defaults  = {flag: default for _l, flag, default, _t in _all_params}
         overrides = []
         for flag, (enabled, value) in self.param_vars.items():
             if enabled.get():
                 label = label_map.get(flag, flag)
                 val   = value.get()
-                dflt  = defaults.get(flag, "")
-                note  = f"  (default {dflt})" if val != dflt else ""
-                overrides.append(f"    {label:<26s} {val}{note}")
+                overrides.append(f"    {label:<26s} {val}")
 
         if overrides:
             lines.append(f"  Parameter Overrides:")
@@ -558,7 +678,6 @@ class App(tk.Tk):
         else:
             lines.append(f"  Parameter Overrides:  (all defaults)")
 
-        # Flags
         flags_on = []
         for label, flag, _tip in FLAG_PARAMS:
             if self.flag_vars.get(flag, tk.BooleanVar()).get():
@@ -573,12 +692,17 @@ class App(tk.Tk):
                 flags_on.append(label)
 
         lines.append(f"  Flags:   {', '.join(flags_on) if flags_on else '(none)'}")
+
+        poly_on = self.flag_vars.get("--poly", tk.BooleanVar()).get()
+        mel_name = self.melody_prog_var.get() if self.melody_prog_var else "Acoustic Grand Piano"
+        lines.append(f"  Melody Instrument:  {mel_name}")
+        if poly_on:
+            bg_name = self.bg_prog_var.get() if self.bg_prog_var else "Steel Guitar"
+            lines.append(f"  Background Instrument:  {bg_name}")
         lines.append(f"")
 
         with open(config_path, "a", encoding="utf-8") as cf:
             cf.write("\n".join(lines) + "\n")
-
-    # ── Browse dialogs ───────────────────────────────────────────────
 
     def _browse_input(self):
         path = filedialog.askopenfilename(
@@ -587,9 +711,9 @@ class App(tk.Tk):
         )
         if path:
             self.in_var.set(path)
-            # Auto-populate output name from input filename (if user hasn't set one)
-            cur_out = self.out_var.get().strip()
-            if not cur_out or cur_out == "auto from input name":
+            # auto-fill output name from input
+            cur_out = self.out_var.get()
+            if not cur_out.strip() or cur_out == " auto from input name":
                 base = os.path.splitext(os.path.basename(path))[0]
                 self.out_var.set(base)
 
@@ -600,7 +724,7 @@ class App(tk.Tk):
             filetypes=[("All", "*.*")],
         )
         if path:
-            # Strip known extensions — user only sees the base name
+            # strip known extensions
             base = path
             for ext in (".mid", ".midi", ".wav", ".csv"):
                 if base.lower().endswith(ext):
@@ -608,17 +732,13 @@ class App(tk.Tk):
                     break
             self.out_var.set(base)
 
-    # ── Build CLI args ───────────────────────────────────────────────
-
     def _build_args(self):
         args = [sys.executable, "main.py"]
         in_path = self.in_var.get()
         args += ["--in", in_path]
 
-        # Auto-append extensions, route to outputs/ folder
         raw = self.out_var.get().strip()
-        if not raw or raw == "auto from input name":
-            # Derive from input filename
+        if not raw or raw == " auto from input name":
             base = os.path.splitext(os.path.basename(in_path))[0] or "output"
         else:
             base = raw
@@ -635,7 +755,6 @@ class App(tk.Tk):
             if var.get():
                 args.append(flag)
 
-        # Top-level "Export .wav" — render MIDI as standalone WAV
         if self.export_wav_var.get():
             args += ["--wav", os.path.join("outputs", base + ".wav")]
 
@@ -646,9 +765,15 @@ class App(tk.Tk):
                 elif flag == "--dual":
                     args += [flag, os.path.join("outputs", base + "_dual.wav")]
 
-        return args
+        gm_lookup = {name: prog for name, prog in GM_INSTRUMENTS}
+        if self.melody_prog_var:
+            mel_prog = gm_lookup.get(self.melody_prog_var.get(), 0)
+            args += ["--melody-prog", str(mel_prog)]
+        if self.bg_prog_var:
+            bg_prog = gm_lookup.get(self.bg_prog_var.get(), 26)
+            args += ["--bg-prog", str(bg_prog)]
 
-    # ── Generate ─────────────────────────────────────────────────────
+        return args
 
     def _on_generate(self):
         if self.running:
@@ -663,7 +788,6 @@ class App(tk.Tk):
             self._log(f"ERROR: Input file not found: {in_path}\n", tag="err")
             return
 
-        # Ensure outputs/ directory exists
         os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
         self.running = True
@@ -677,7 +801,6 @@ class App(tk.Tk):
 
         cmd = self._build_args()
 
-        # Save config to debug file if enabled
         if self.save_config_var.get():
             self._save_config_readable()
 
@@ -709,18 +832,16 @@ class App(tk.Tk):
             self.process = None
             self.after(0, self._reset_button)
 
-    # ANSI SGR codes we care about → tkinter tag names
     _ANSI_RE = re.compile(r"\033\[(\d+)m")
     _ANSI_TAG = {"32": "ok", "31": "err", "0": None}
 
     def _append_line(self, line):
-        # Intercept STAGE= lines for progress bar (don't log them)
+        # stage lines go to progress bar, not log
         stripped = line.strip()
         if stripped.startswith("STAGE="):
             stage = stripped.split("=", 1)[1]
             self._update_progress(stage)
             return
-        # Lines with ANSI colour codes → parse and apply tags
         if "\033[" in line:
             self._log_ansi(line)
             return
@@ -728,18 +849,18 @@ class App(tk.Tk):
         self._log(line, tag)
 
     def _log_ansi(self, line):
-        """Parse ANSI colour codes and insert with matching tkinter tags."""
+        """Parse ANSI codes and insert with matching tags."""
         self.log_text.configure(state="normal")
         parts = self._ANSI_RE.split(line)
         cur_tag = None
         for i, part in enumerate(parts):
-            if i % 2 == 0:          # text fragment
+            if i % 2 == 0:
                 if part:
                     if cur_tag:
                         self.log_text.insert("end", part, cur_tag)
                     else:
                         self.log_text.insert("end", part)
-            else:                    # ANSI code number
+            else:
                 cur_tag = self._ANSI_TAG.get(part)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
@@ -757,8 +878,6 @@ class App(tk.Tk):
         self.running = False
         self.gen_btn.configure(text="GENERATE", bg=GEN_BG, fg=GEN_FG,
                                state="normal")
-
-    # ── Progress bar ─────────────────────────────────────────────────
 
     def _update_progress(self, stage_name):
         if stage_name not in STAGE_MAP:

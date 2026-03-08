@@ -8,9 +8,7 @@ import typing
 # decode streaming helper using ffmpeg. We use subprocess to call ffmpeg and stream raw PCM audio data from it.
 
 def probe_sample_rate(path: str) -> int | None:
-    """
-    Returns input sample rate if ffprobe can read it, otherwise it returns None.
-    """
+    """Returns input sample rate via ffprobe, or None on failure."""
     try:
         cp = subprocess.run(
             [
@@ -35,11 +33,8 @@ def stream_m4a_blocks_ffmpeg(
     in_path: str,
     block_size: int,
     target_sr: int = 44100,) -> tuple[int, "typing.Iterator[np.ndarray]"]:
-    """
-    Streams decoded mono PCM blocks from ffmpeg.
-    Output blocks are float32 in [-1, 1], length <= block_size.
-    Returns (output_sample_rate, iterator).
-    """
+    """Streams decoded mono float32 PCM blocks from ffmpeg.
+    Returns (output_sample_rate, block_iterator)."""
 
 
     cmd = [
@@ -58,13 +53,13 @@ def stream_m4a_blocks_ffmpeg(
     if proc.stdout is None:
         raise RuntimeError("Failed to open ffmpeg stdout pipe.")
 
-    bytes_per_sample = 2  # tasked to do 16 bit PCM, 2 bytes per sample
+    bytes_per_sample = 2  # 16-bit PCM
     read_bytes = block_size * bytes_per_sample
 
     def _iter_blocks() -> typing.Iterator[np.ndarray]:
         try:
             while True:
-                raw = proc.stdout.read(read_bytes) #reads raw bytes from ffmpeg
+                raw = proc.stdout.read(read_bytes)
                 if not raw:
                     break
 
@@ -73,10 +68,10 @@ def stream_m4a_blocks_ffmpeg(
                 if (len(raw) % 2) == 1:
                     raw = raw[:-1]
 
-                x_i16 = np.frombuffer(raw, dtype=np.int16) #interpret raw bytes as int16 samples
-                x = (x_i16.astype(np.float32) / 32768.0) #converts into -1 to 1 float32 range
+                x_i16 = np.frombuffer(raw, dtype=np.int16)
+                x = (x_i16.astype(np.float32) / 32768.0)  # normalize to [-1, 1]
 
-                # Acceptance requirement: never exceed block_size
+                # sanity check: never exceed block_size
                 if x.shape[0] > block_size:
                     raise RuntimeError(f"Internal error: block len {x.shape[0]} > {block_size}")
 

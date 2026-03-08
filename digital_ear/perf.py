@@ -6,10 +6,8 @@ import psutil #read process memory
 # timing / memory helper 
 
 class PerfLogger:
-    """
-    Tracks time and peak resident memory, RSS, in MB. 
-    Ensure we are under safety constraints for Pi.
-    """
+    """Tracks elapsed time and peak RSS in MB.
+    Used to make sure we stay within Pi memory limits."""
 
     def __init__(self) -> None:
         self._proc = psutil.Process(os.getpid())

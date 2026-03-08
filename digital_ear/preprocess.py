@@ -15,11 +15,8 @@ def rms(x: np.ndarray) -> float:
 
 @dataclass
 class OnePoleLPF:
-    """
-    1st-order low-pass filter (one-pole IIR), streaming-friendly.
-    y[n] = y[n-1] + a * (x[n] - y[n-1])
-    where a = 1 - exp(-2*pi*fc/fs)
-    """
+    """One-pole IIR low-pass, streaming.
+    y[n] = y[n-1] + a*(x[n] - y[n-1]), a = 1 - exp(-2*pi*fc/fs)"""
     fs: float
     fc: float
     y1: float = 0.0  # previous output
@@ -46,13 +43,8 @@ class OnePoleLPF:
 
 @dataclass
 class OnePoleHPF:
-    """
-    1st-order high-pass filter built from a one-pole low-pass:
-      hp(x) = x - lp(x)
-    This acts as a DC blocker and rumble removal.
-
-    Keeps LP state internally.
-    """
+    """High-pass from one-pole LP: hp(x) = x - lp(x).
+    Acts as DC blocker / rumble removal."""
     fs: float
     fc: float
     _lp: OnePoleLPF = None  # created in __post_init__
@@ -73,14 +65,8 @@ class OnePoleHPF:
 
 @dataclass
 class Preprocessor:
-    """
-    MVP preprocessing chain:
-      1) DC blocker (HPF ~ 30 Hz)
-      2) additional HPF (optional) to push out low end (~70 Hz)
-      3) LPF to reduce harmonics/noise (~1200 Hz)
-
-    All streaming, stateful across blocks.
-    """
+    """Preprocessing chain: DC blocker -> HPF (~70 Hz) -> LPF (~1200 Hz).
+    All streaming, stateful across blocks."""
     fs: float
     dc_fc: float = 30.0
     hp_fc: float = 70.0

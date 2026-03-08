@@ -1,11 +1,8 @@
-# Note tracker: converts a stream of per-frame f0 estimates into discrete
-# MIDI note events with onset/offset times.
+# Note tracker: f0 stream -> discrete MIDI note events
 #
-# Pipeline:
-#   1. Median smoothing (removes single-frame pitch glitches)
-#   2. f0 → MIDI note number (with rounding)
-#   3. Run-length encoding: consecutive frames with the same note become one event
-#   4. Minimum-duration gating: discard notes shorter than a threshold
+# Streaming with bounded memory. Median smoothing, octave correction,
+# run-length encoding into pending notes, then post-processing
+# (sharpen boundaries, merge, outlier removal, reonset splitting).
 
 from __future__ import annotations
 
@@ -35,285 +32,408 @@ class NoteEvent:
 
 @dataclass
 class NoteTracker:
-    """
-    Streaming note tracker that accumulates f0 observations and emits
-    NoteEvent objects.
-
-    Parameters
-    ----------
-    hop_sec : float
-        Duration of one hop in seconds (hop_samples / sample_rate).
-    median_window : int
-        Size of the running median filter (odd number recommended).
-    min_note_sec : float
-        Minimum note duration in seconds; shorter notes are discarded.
-    """
+    """Streaming note tracker: f0 estimates -> NoteEvents with bounded memory.
+    Notes are emitted incrementally from push()."""
 
     hop_sec: float
     median_window: int = 9
     min_note_sec: float = 0.12
-    merge_gap_sec: float = 0.08  # merge same-pitch notes separated by gaps shorter than this
-    outlier_semitones: int = 14  # remove notes >this many semitones from both neighbors
-    latency_sec: float = 0.0    # processing chain latency compensation (shifts notes earlier)
+    merge_gap_sec: float = 0.08
+    outlier_semitones: int = 14
+    latency_sec: float = 0.0
+    reonset_attack: float = 0.0
+    reonset_min_gap: float = 0.0
+    reonset_min_dur: float = 0.5
 
-    # internal state
+    # -- internal state --
+    # median filter buffer
     _f0_buf: deque = field(init=False, repr=False)
-    _smoothed: list = field(init=False, repr=False)
-    _raw_midi: list = field(init=False, repr=False)
+
+    # sliding window for octave correction: (midi_note|None, abs_frame_idx)
+    _smooth_window: deque = field(init=False, repr=False)
+    # how many smoothed frames have been octave-corrected and fed to RLE
+    _oct_cursor: int = field(init=False, repr=False)
+
+    # ring buffers for raw MIDI and RMS (sharpen + reonset)
+    _raw_midi_buf: deque = field(init=False, repr=False)
+    _rms_ring: deque = field(init=False, repr=False)
+    _ring_start_idx: int = field(init=False, repr=False)  # absolute frame idx of ring[0]
+
+    # run-length encoder state
+    _rle_note: int | None = field(init=False, repr=False)  # current note (or None)
+    _rle_start_idx: int = field(init=False, repr=False)     # start frame of current run
+    _rle_started: bool = field(init=False, repr=False)
+
+    # pending notes (need neighbors for outlier check)
+    _pending: deque = field(init=False, repr=False)
+    _last_emitted: NoteEvent | None = field(init=False, repr=False)
+
     _frame_idx: int = field(init=False, repr=False)
+    _flushing: bool = field(init=False, repr=False)
+
+    # constants
+    _OCT_RADIUS: int = 25       # octave correction look-around (frames)
+    _RING_SIZE: int = 500       # raw_midi + rms ring buffer size
+    _PENDING_DEPTH: int = 3     # notes buffered before oldest can be finalized
 
     def __post_init__(self) -> None:
         self._f0_buf = deque(maxlen=self.median_window)
-        self._smoothed = []  # list of (midi_note | None, frame_idx)
-        self._raw_midi = []  # raw MIDI notes (pre-median) for onset sharpening
+        self._smooth_window = deque()
+        self._oct_cursor = 0
+        self._raw_midi_buf = deque(maxlen=self._RING_SIZE)
+        self._rms_ring = deque(maxlen=self._RING_SIZE)
+        self._ring_start_idx = 0
+        self._rle_note = None
+        self._rle_start_idx = 0
+        self._rle_started = False
+        self._pending = deque()
+        self._last_emitted = None
         self._frame_idx = 0
+        self._flushing = False
 
-    def push(self, f0_hz: float | None) -> None:
-        """Feed one frame's f0 estimate (None = unvoiced)."""
-        # Store raw MIDI note before median smoothing (for onset sharpening)
+    def push(self, f0_hz: float | None, rms_val: float = 0.0) -> list[NoteEvent]:
+        """Feed one frame's f0 estimate. Returns 0+ finalized NoteEvents."""
+
+        # store raw MIDI + RMS
         if f0_hz is not None and f0_hz > 0:
             raw_note = hz_to_midi(f0_hz)
             raw_note = max(0, min(127, raw_note))
         else:
             raw_note = None
-        self._raw_midi.append(raw_note)
 
+        # track ring buffer offset
+        if len(self._raw_midi_buf) == self._RING_SIZE:
+            self._ring_start_idx += 1
+        self._raw_midi_buf.append(raw_note)
+        self._rms_ring.append(rms_val)
+
+        # median filter
         self._f0_buf.append(f0_hz)
         self._frame_idx += 1
 
-        # Don't emit until the buffer is full (latency = median_window // 2 frames)
         if len(self._f0_buf) < self.median_window:
-            return
+            return []
 
-        # Median of the non-None values in the window
         vals = [v for v in self._f0_buf if v is not None]
         if len(vals) >= (self.median_window // 2 + 1):
-            # Majority voiced → take median pitch
             median_hz = sorted(vals)[len(vals) // 2]
             midi_note = hz_to_midi(median_hz)
             midi_note = max(0, min(127, midi_note))
         else:
             midi_note = None
 
-        # The smoothed value corresponds to the centre of the window
         centre_idx = self._frame_idx - (self.median_window // 2) - 1
-        self._smoothed.append((midi_note, centre_idx))
+        self._smooth_window.append((midi_note, centre_idx))
+
+        # octave-correct frames that have enough trailing context
+        emitted = self._process_smoothed_window()
+        return emitted
 
     def flush(self) -> list[NoteEvent]:
-        """
-        Flush remaining buffered frames and return all detected note events.
-        Call once after all audio has been processed.
-        """
-        # Drain remaining samples in the median buffer
+        """End of stream: drain remaining frames and pending notes."""
+        self._flushing = True
+        result: list[NoteEvent] = []
+
+        # drain median buffer
         pad_count = self.median_window // 2
         for _ in range(pad_count):
-            self.push(None)
+            result.extend(self.push(None))
 
-        self._octave_correct()
-        events = self._run_length_encode()
-        events = self._sharpen_boundaries(events)
-        events = self._merge_fragments(events)
-        events = self._remove_outliers(events)
-        return events
+        # process remaining smoothed frames (no more context coming)
+        while self._oct_cursor < len(self._smooth_window):
+            self._octave_correct_frame(self._oct_cursor)
+            note, idx = self._smooth_window[self._oct_cursor]
+            self._oct_cursor += 1
+            self._rle_feed(note, idx)
+
+        # close final RLE run
+        if self._rle_started and self._rle_note is not None:
+            evt = self._rle_emit(self._smooth_window[-1][1] + 1 if self._smooth_window else self._rle_start_idx)
+            if evt is not None:
+                self._pending.append(evt)
+
+        # flush pending notes
+        result.extend(self._drain_pending(force_all=True))
+
+        self._flushing = False
+        return result
+
+    def _process_smoothed_window(self) -> list[NoteEvent]:
+        """Process smoothed frames that have enough trailing context for octave correction."""
+        emitted: list[NoteEvent] = []
+
+        # frame at position i needs _OCT_RADIUS frames after it
+        while self._oct_cursor < len(self._smooth_window) - self._OCT_RADIUS:
+            self._octave_correct_frame(self._oct_cursor)
+            note, idx = self._smooth_window[self._oct_cursor]
+            self._oct_cursor += 1
+            rle_events = self._rle_feed(note, idx)
+            emitted.extend(rle_events)
+
+            # trim old frames, keep enough for look-back
+            trim_target = self._oct_cursor - self._OCT_RADIUS
+            if trim_target > 0:
+                for _ in range(trim_target):
+                    self._smooth_window.popleft()
+                self._oct_cursor -= trim_target
+
+        return emitted
+
+    def _octave_correct_frame(self, pos: int) -> None:
+        """Snap frame at `pos` down/up an octave if it's far from the local median."""
+        note_i, idx_i = self._smooth_window[pos]
+        if note_i is None:
+            return
+
+        n = len(self._smooth_window)
+        lo = max(0, pos - self._OCT_RADIUS)
+        hi = min(n, pos + self._OCT_RADIUS + 1)
+
+        local_notes: list[int] = []
+        for j in range(lo, hi):
+            nj = self._smooth_window[j][0]
+            if nj is not None:
+                local_notes.append(nj)
+
+        if len(local_notes) < 5:
+            return
+
+        local_notes.sort()
+        median_note = local_notes[len(local_notes) // 2]
+
+        diff = note_i - median_note
+        if 11 <= diff <= 13:
+            self._smooth_window[pos] = (note_i - 12, idx_i)
+        elif 18 <= diff <= 20:
+            self._smooth_window[pos] = (note_i - 19, idx_i)
+        elif -13 <= diff <= -11:
+            self._smooth_window[pos] = (note_i + 12, idx_i)
+
+    def _rle_feed(self, midi_note: int | None, frame_idx: int) -> list[NoteEvent]:
+        """Feed one frame to the RLE. Returns finalized events when a note
+        boundary causes the pending queue to drain."""
+        emitted: list[NoteEvent] = []
+
+        if not self._rle_started:
+            self._rle_note = midi_note
+            self._rle_start_idx = frame_idx
+            self._rle_started = True
+            return emitted
+
+        if midi_note != self._rle_note:
+            # note boundary, close previous run
+            evt = self._rle_emit(frame_idx)
+            if evt is not None:
+                self._pending.append(evt)
+                # try to finalize old pending notes
+                emitted.extend(self._drain_pending(force_all=False))
+
+            self._rle_note = midi_note
+            self._rle_start_idx = frame_idx
+
+        return emitted
+
+    def _rle_emit(self, end_frame_idx: int) -> NoteEvent | None:
+        """Close current RLE run into a NoteEvent (None if unvoiced/too short)."""
+        if self._rle_note is None:
+            return None
+
+        lat = self.latency_sec
+        start_sec = max(0.0, self._rle_start_idx * self.hop_sec - lat)
+        end_sec = max(start_sec, end_frame_idx * self.hop_sec - lat)
+
+        if end_sec - start_sec < self.min_note_sec:
+            return None
+
+        return NoteEvent(
+            note=self._rle_note,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+
+    def _drain_pending(self, force_all: bool = False) -> list[NoteEvent]:
+        """Finalize pending notes. Needs _PENDING_DEPTH notes buffered so
+        outlier check can see prev + next. force_all=True drains everything."""
+        emitted: list[NoteEvent] = []
+
+        while len(self._pending) > 0:
+            if not force_all and len(self._pending) < self._PENDING_DEPTH:
+                break
+
+            note = self._pending.popleft()
+
+            # sharpen boundaries
+            note = self._sharpen_single(note)
+            if note is None:
+                continue
+
+            # reonset split
+            split_notes = self._reonset_single(note)
+
+            for sn in split_notes:
+                # outlier check
+                if self._is_outlier(sn):
+                    continue
+
+                # merge if same pitch + small gap
+                if self._try_merge(sn):
+                    continue  # merged into _last_emitted
+
+                self._last_emitted = sn
+                emitted.append(sn)
+
+        return emitted
 
     @staticmethod
     def _pitch_matches(raw_note: int, target_note: int) -> bool:
-        """Check if a raw MIDI note matches target, allowing octave correction."""
+        """Does raw_note match target (allowing octave correction)?"""
         diff = abs(raw_note - target_note)
         return diff <= 1 or diff == 12 or diff == 19
 
-    def _sharpen_boundaries(self, events: list[NoteEvent]) -> list[NoteEvent]:
-        """Refine onset/offset times using raw (pre-median) pitch data.
+    def _raw_midi_at(self, abs_idx: int) -> int | None:
+        """Get raw MIDI value at absolute frame index, or None if out of range."""
+        local = abs_idx - self._ring_start_idx
+        if 0 <= local < len(self._raw_midi_buf):
+            return self._raw_midi_buf[local]
+        return None
 
-        The median filter stabilises pitch but blurs note boundaries by up to
-        median_window//2 frames (~81 ms).  For each note event we scan the raw
-        MIDI values around its boundaries to find the true transition point.
-        """
-        if not events or not self._raw_midi:
-            return events
+    def _rms_at(self, abs_idx: int) -> float:
+        """Get RMS value at absolute frame index, or 0 if out of range."""
+        local = abs_idx - self._ring_start_idx
+        if 0 <= local < len(self._rms_ring):
+            return self._rms_ring[local]
+        return 0.0
 
+    def _sharpen_single(self, evt: NoteEvent) -> NoteEvent | None:
+        """Sharpen onset/offset using raw MIDI data."""
         half_w = self.median_window // 2
         lat = self.latency_sec
-        n_raw = len(self._raw_midi)
 
-        sharpened: list[NoteEvent] = []
-        for evt in events:
-            # Convert times back to frame indices
-            onset_frame = round((evt.start_sec + lat) / self.hop_sec)
-            offset_frame = round((evt.end_sec + lat) / self.hop_sec)
+        onset_frame = round((evt.start_sec + lat) / self.hop_sec)
+        offset_frame = round((evt.end_sec + lat) / self.hop_sec)
 
-            # Sharpen onset: find earliest matching raw frame
-            search_lo = max(0, onset_frame - half_w)
-            search_hi = min(n_raw, onset_frame + half_w + 1)
-            new_onset = onset_frame
-            for j in range(search_lo, search_hi):
-                raw = self._raw_midi[j]
-                if raw is not None and self._pitch_matches(raw, evt.note):
-                    new_onset = j
-                    break
+        # find earliest matching raw frame
+        new_onset = onset_frame
+        for j in range(max(0, onset_frame - half_w), onset_frame + half_w + 1):
+            raw = self._raw_midi_at(j)
+            if raw is not None and self._pitch_matches(raw, evt.note):
+                new_onset = j
+                break
 
-            # Sharpen offset: find latest matching raw frame
-            search_lo2 = max(0, offset_frame - half_w - 1)
-            search_hi2 = min(n_raw, offset_frame + half_w)
-            new_offset = offset_frame
-            for j in range(search_hi2 - 1, search_lo2 - 1, -1):
-                raw = self._raw_midi[j]
-                if raw is not None and self._pitch_matches(raw, evt.note):
-                    new_offset = j + 1
-                    break
+        # find latest matching raw frame
+        new_offset = offset_frame
+        for j in range(offset_frame + half_w - 1, max(-1, offset_frame - half_w - 2), -1):
+            raw = self._raw_midi_at(j)
+            if raw is not None and self._pitch_matches(raw, evt.note):
+                new_offset = j + 1
+                break
 
-            start_sec = max(0.0, new_onset * self.hop_sec - lat)
-            end_sec = max(start_sec, new_offset * self.hop_sec - lat)
+        start_sec = max(0.0, new_onset * self.hop_sec - lat)
+        end_sec = max(start_sec, new_offset * self.hop_sec - lat)
 
-            if end_sec - start_sec >= self.min_note_sec:
-                sharpened.append(NoteEvent(
-                    note=evt.note, start_sec=start_sec, end_sec=end_sec,
+        if end_sec - start_sec < self.min_note_sec:
+            return None
+
+        # fix overlap with previous note
+        if self._last_emitted is not None and start_sec < self._last_emitted.end_sec:
+            mid = (start_sec + self._last_emitted.end_sec) / 2.0
+            self._last_emitted = NoteEvent(
+                note=self._last_emitted.note,
+                start_sec=self._last_emitted.start_sec,
+                end_sec=mid,
+                velocity=self._last_emitted.velocity,
+            )
+            start_sec = mid
+
+        return NoteEvent(
+            note=evt.note,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            velocity=evt.velocity,
+        )
+
+    def _is_outlier(self, evt: NoteEvent) -> bool:
+        """Is this note a pitch outlier relative to its neighbors?"""
+        prev = self._last_emitted
+        # peek at next pending note
+        nxt = self._pending[0] if self._pending else None
+
+        if prev is None or nxt is None:
+            return False  # can't check without both neighbors
+
+        prev_dist = abs(evt.note - prev.note)
+        next_dist = abs(evt.note - nxt.note)
+        return prev_dist > self.outlier_semitones and next_dist > self.outlier_semitones
+
+    def _try_merge(self, evt: NoteEvent) -> bool:
+        """Try to merge evt into _last_emitted. Returns True if merged."""
+        if self._last_emitted is None:
+            return False
+
+        gap = evt.start_sec - self._last_emitted.end_sec
+        if evt.note == self._last_emitted.note and gap <= self.merge_gap_sec:
+            self._last_emitted = NoteEvent(
+                note=self._last_emitted.note,
+                start_sec=self._last_emitted.start_sec,
+                end_sec=evt.end_sec,
+                velocity=self._last_emitted.velocity,
+            )
+            return True
+        return False
+
+    def _reonset_single(self, evt: NoteEvent) -> list[NoteEvent]:
+        """Split a note at RMS attack transients. Returns 1+ notes."""
+        if self.reonset_attack <= 0:
+            return [evt]
+
+        lat = self.latency_sec
+        hop = self.hop_sec
+        effective_gap = self.reonset_min_gap if self.reonset_min_gap > 0 else self.min_note_sec
+        min_gap_frames = max(1, int(effective_gap / hop))
+        rms_alpha = 0.95
+
+        start_frame = int(round((evt.start_sec + lat) / hop))
+        end_frame = int(round((evt.end_sec + lat) / hop))
+
+        note_dur = evt.end_sec - evt.start_sec
+        if note_dur < self.reonset_min_dur or end_frame - start_frame < 2 * min_gap_frames:
+            return [evt]
+
+        # scan for RMS attack transients
+        split_frames: list[int] = []
+        rms_ema = self._rms_at(start_frame)
+        frames_since_last = 0
+
+        for fi in range(start_frame + 1, end_frame):
+            frames_since_last += 1
+            cur_rms = self._rms_at(fi)
+
+            if (rms_ema > 0
+                    and cur_rms > self.reonset_attack * rms_ema
+                    and frames_since_last >= min_gap_frames):
+                split_frames.append(fi)
+                frames_since_last = 0
+                rms_ema = cur_rms
+
+            rms_ema = rms_alpha * rms_ema + (1.0 - rms_alpha) * cur_rms
+
+        if not split_frames:
+            return [evt]
+
+        # split into sub-notes
+        result: list[NoteEvent] = []
+        boundaries = [start_frame] + split_frames + [end_frame]
+        for i in range(len(boundaries) - 1):
+            s = boundaries[i]
+            e = boundaries[i + 1]
+            s_sec = max(0.0, s * hop - lat)
+            e_sec = max(s_sec, e * hop - lat)
+            if e_sec - s_sec >= self.min_note_sec:
+                result.append(NoteEvent(
+                    note=evt.note,
+                    start_sec=s_sec,
+                    end_sec=e_sec,
                     velocity=evt.velocity,
                 ))
 
-        # Fix overlaps created by boundary adjustment
-        for i in range(len(sharpened) - 1):
-            if sharpened[i].end_sec > sharpened[i + 1].start_sec:
-                mid = (sharpened[i].end_sec + sharpened[i + 1].start_sec) / 2.0
-                sharpened[i] = NoteEvent(
-                    note=sharpened[i].note,
-                    start_sec=sharpened[i].start_sec,
-                    end_sec=mid,
-                    velocity=sharpened[i].velocity,
-                )
-                sharpened[i + 1] = NoteEvent(
-                    note=sharpened[i + 1].note,
-                    start_sec=mid,
-                    end_sec=sharpened[i + 1].end_sec,
-                    velocity=sharpened[i + 1].velocity,
-                )
-
-        return sharpened
-
-    def _merge_fragments(self, events: list[NoteEvent]) -> list[NoteEvent]:
-        """Merge consecutive events of the same pitch separated by small gaps."""
-        if len(events) < 2:
-            return events
-
-        merged: list[NoteEvent] = [events[0]]
-        for evt in events[1:]:
-            prev = merged[-1]
-            gap = evt.start_sec - prev.end_sec
-            if evt.note == prev.note and gap <= self.merge_gap_sec:
-                # Extend the previous note
-                merged[-1] = NoteEvent(
-                    note=prev.note,
-                    start_sec=prev.start_sec,
-                    end_sec=evt.end_sec,
-                    velocity=prev.velocity,
-                )
-            else:
-                merged.append(evt)
-        return merged
-
-    def _octave_correct(self) -> None:
-        """Fix octave/harmonic jumps in the smoothed frame sequence.
-
-        For each voiced frame, compute a local pitch centre from a ±25-frame
-        neighbourhood.  If the frame's note is ~12 or ~19 semitones above the
-        centre, snap it down by 12 or 19 semitones (it was likely a harmonic
-        tracking error).  Similarly snap up if it's an octave below.
-        """
-        n = len(self._smoothed)
-        if n == 0:
-            return
-
-        radius = 25  # ~290 ms look-around at hop=512/44100
-
-        for i in range(n):
-            note_i, idx_i = self._smoothed[i]
-            if note_i is None:
-                continue
-
-            # Gather local voiced notes
-            local_notes: list[int] = []
-            lo = max(0, i - radius)
-            hi = min(n, i + radius + 1)
-            for j in range(lo, hi):
-                nj = self._smoothed[j][0]
-                if nj is not None:
-                    local_notes.append(nj)
-
-            if len(local_notes) < 5:
-                continue
-
-            local_notes.sort()
-            median_note = local_notes[len(local_notes) // 2]
-
-            diff = note_i - median_note
-            # Snap down if ~1 octave (12 st) or ~octave+fifth (19 st) above
-            if 11 <= diff <= 13:
-                self._smoothed[i] = (note_i - 12, idx_i)
-            elif 18 <= diff <= 20:
-                self._smoothed[i] = (note_i - 19, idx_i)
-            # Snap up if ~1 octave below
-            elif -13 <= diff <= -11:
-                self._smoothed[i] = (note_i + 12, idx_i)
-
-    def _remove_outliers(self, events: list[NoteEvent]) -> list[NoteEvent]:
-        """Remove notes that are pitch outliers — far from both neighbors."""
-        if len(events) < 3:
-            return events
-
-        keep: list[NoteEvent] = [events[0]]  # always keep first
-        for i in range(1, len(events) - 1):
-            prev_dist = abs(events[i].note - events[i - 1].note)
-            next_dist = abs(events[i].note - events[i + 1].note)
-            # Only remove if far from BOTH neighbors (isolated outlier)
-            if prev_dist > self.outlier_semitones and next_dist > self.outlier_semitones:
-                continue
-            keep.append(events[i])
-        keep.append(events[-1])  # always keep last
-        return keep
-
-    def _run_length_encode(self) -> list[NoteEvent]:
-        """Convert the smoothed note sequence into NoteEvent list.
-
-        Applies latency_sec compensation to shift all note times earlier,
-        correcting for processing chain delays (frame windowing, HPSS onset
-        softening, etc.).
-        """
-        events: list[NoteEvent] = []
-        if not self._smoothed:
-            return events
-
-        lat = self.latency_sec  # shorthand
-
-        cur_note = self._smoothed[0][0]
-        cur_start = self._smoothed[0][1]
-
-        for midi_note, idx in self._smoothed[1:]:
-            if midi_note != cur_note:
-                # Emit previous note (if it was voiced)
-                if cur_note is not None:
-                    start_sec = max(0.0, cur_start * self.hop_sec - lat)
-                    end_sec = max(start_sec, idx * self.hop_sec - lat)
-                    duration = end_sec - start_sec
-                    if duration >= self.min_note_sec:
-                        events.append(NoteEvent(
-                            note=cur_note,
-                            start_sec=start_sec,
-                            end_sec=end_sec,
-                        ))
-                cur_note = midi_note
-                cur_start = idx
-
-        # Final note
-        if cur_note is not None:
-            last_idx = self._smoothed[-1][1] + 1
-            start_sec = max(0.0, cur_start * self.hop_sec - lat)
-            end_sec = max(start_sec, last_idx * self.hop_sec - lat)
-            duration = end_sec - start_sec
-            if duration >= self.min_note_sec:
-                events.append(NoteEvent(
-                    note=cur_note,
-                    start_sec=start_sec,
-                    end_sec=end_sec,
-                ))
-
-        return events
+        return result if result else [evt]

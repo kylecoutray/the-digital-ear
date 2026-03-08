@@ -1,16 +1,8 @@
-# Streaming online Viterbi melody extractor
+# Online Viterbi melody extractor
 #
-# Processes one frame at a time via push(), emitting melody decisions
-# with a fixed lag of ~50 frames (~580 ms). Uses a ring buffer of
-# backpointers for online backtrace.
-#
-# Features:
-#   - Causal tonality smoothing (0.5s lookback)
-#   - Causal density estimation (10s lookback)
-#   - Causal octave correction (5s lookback median)
-#   - Density-adaptive transition/emission parameters
-#
-# State: ~23 KB constant regardless of audio length.
+# One frame at a time via push(), melody decisions come out with ~50 frame
+# lag (~580ms). Ring buffer of backpointers for online backtrace.
+# Tonality/density smoothing is all causal. ~23 KB constant memory.
 #
 # Reference: online Viterbi / fixed-lag smoothing for HMMs.
 
@@ -24,12 +16,8 @@ import numpy as np
 
 @dataclass
 class MelodyExtractor:
-    """
-    Streaming online Viterbi melody extractor.
-
-    Feed frames one at a time via push(), get melody decisions back
-    (delayed by `lag` frames). Call flush() at end of stream.
-    """
+    """Online Viterbi melody extractor. Feed frames via push(), get melody
+    decisions back delayed by `lag` frames. Call flush() at end of stream."""
 
     hop_sec: float
     lag: int = 50                        # fixed-lag backtrace depth (~580 ms)
@@ -42,37 +30,32 @@ class MelodyExtractor:
     density_voicing_floor: float = 0.4
     density_jump_floor: float = 0.7
     octave_smooth_sec: float = 5.0
-    # Previous frame's smoothed values (needed for transition averaging)
+    # prev frame's smoothed values (for transition averaging)
     _prev_ton: float = field(init=False, repr=False, default=0.5)
     _prev_den: float = field(init=False, repr=False, default=1.0)
 
-    # Internal state (set in __post_init__)
+    # internal state
     _V_prev: np.ndarray | None = field(init=False, repr=False, default=None)
     _states_prev: list = field(init=False, repr=False, default_factory=list)
     _ring: list = field(init=False, repr=False, default_factory=list)
     _frame_idx: int = field(init=False, repr=False, default=0)
 
-    # Causal smoothing buffers
+    # smoothing buffers
     _tonality_buf: deque = field(init=False, repr=False)
     _density_buf: deque = field(init=False, repr=False)
     _recent_voiced: deque = field(init=False, repr=False)
 
-    # Causal octave correction
+    # octave correction
     _octave_ring: deque = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        # Tonality: causal 0.5s moving average
-        ton_window = max(1, int(0.5 / self.hop_sec))
+        ton_window = max(1, int(0.5 / self.hop_sec))  # 0.5s moving avg
         self._tonality_buf = deque(maxlen=ton_window)
-
-        # Density: causal 0.5s smoothing of the density value
         self._density_buf = deque(maxlen=ton_window)
 
-        # Voiced history: 10s lookback for density computation
-        density_window = max(1, int(10.0 / self.hop_sec))
+        density_window = max(1, int(10.0 / self.hop_sec))  # 10s lookback
         self._recent_voiced = deque(maxlen=density_window)
 
-        # Octave correction: 5s lookback
         oct_window = max(1, int(self.octave_smooth_sec / self.hop_sec))
         self._octave_ring = deque(maxlen=oct_window)
 
@@ -81,30 +64,27 @@ class MelodyExtractor:
         candidates: list[tuple[float, float]],
         tonality: float,
     ) -> float | None:
-        """Process one frame's candidates and tonality.
+        """Process one frame. Returns f0_hz (or None) for the frame
+        emitted `lag` frames behind current, or None if still filling up."""
 
-        Returns f0_hz (or None for unvoiced) for the frame emitted
-        `lag` frames behind current, or None if still in startup.
-        """
-        # 1. Causal density estimation
+        # density estimation
         has_cands = 1.0 if len(candidates) > 0 else 0.0
         self._recent_voiced.append(has_cands)
         density = sum(self._recent_voiced) / len(self._recent_voiced)
 
-        # 2. Causal smoothing
+        # smoothing
         self._tonality_buf.append(tonality)
         self._density_buf.append(density)
         ton_smooth = sum(self._tonality_buf) / len(self._tonality_buf)
         den_smooth = sum(self._density_buf) / len(self._density_buf)
 
-        # 3. Build frame states: candidates + unvoiced option
+        # frame states: candidates + unvoiced
         frame_states = [(hz, conf) for hz, conf in candidates]
         frame_states.append((None, 0.0))  # unvoiced
         ns_cur = len(frame_states)
 
-        # 4. Viterbi step
+        # Viterbi step
         if self._V_prev is None:
-            # First frame: initialize
             V_cur = np.zeros(ns_cur, dtype=np.float32)
             for j, (hz_j, conf) in enumerate(frame_states):
                 V_cur[j] = self._emission(conf, ton_smooth, den_smooth)
@@ -133,17 +113,16 @@ class MelodyExtractor:
                 V_cur[j] = best_val + emit_j
                 bp[j] = best_i
 
-        # 5. Store in ring buffer
+        # store in ring buffer
         self._ring.append((bp, frame_states, V_cur.copy()))
 
-        # 6. Update state
         self._V_prev = V_cur
         self._states_prev = frame_states
         self._prev_ton = ton_smooth
         self._prev_den = den_smooth
         self._frame_idx += 1
 
-        # 7. If ring buffer exceeds lag, emit oldest via backtrace
+        # emit oldest via backtrace once ring exceeds lag
         if len(self._ring) > self.lag:
             return self._emit_oldest()
         return None
@@ -156,40 +135,40 @@ class MelodyExtractor:
         return results
 
     def _emit_oldest(self) -> float | None:
-        """Backtrace from current best to oldest frame, emit and discard."""
+        """Backtrace from current best to oldest frame, pop it off."""
         if not self._ring:
             return None
 
-        # Find current best state
+        # current best state
         _, _, V_latest = self._ring[-1]
         state_idx = int(np.argmax(V_latest))
 
-        # Backtrace through the ring
+        # backtrace
         for i in range(len(self._ring) - 1, 0, -1):
             bp_i, _, _ = self._ring[i]
             state_idx = int(bp_i[state_idx])
 
-        # Get the oldest entry's decision
+        # oldest entry's decision
         _, oldest_states, _ = self._ring[0]
         hz, conf = oldest_states[state_idx]
 
-        # Apply causal octave correction
+        # octave correction
         hz = self._causal_octave_correct(hz)
 
-        # Remove oldest from ring
+        # drop oldest
         self._ring.pop(0)
 
         return hz
 
     def _causal_octave_correct(self, hz: float | None) -> float | None:
-        """Correct octave errors using causal 5s lookback median."""
+        """Fix octave jumps using 5s lookback median."""
         if hz is None or hz <= 0:
             self._octave_ring.append(0.0)
             return hz
 
         self._octave_ring.append(hz)
 
-        # Need enough context
+        # need enough context
         voiced = [v for v in self._octave_ring if v > 0]
         if len(voiced) < 5:
             return hz
@@ -214,7 +193,7 @@ class MelodyExtractor:
         return hz
 
     def _emission(self, conf: float, tonality: float, density: float = 1.0) -> float:
-        """Score for choosing a candidate, weighted by tonality and density."""
+        """Emission score, weighted by tonality and density."""
         if conf <= 0:
             return 0.0
         base = math.log1p(conf)
@@ -226,7 +205,7 @@ class MelodyExtractor:
         self, hz_prev: float | None, hz_cur: float | None,
         tonality: float, density: float = 1.0
     ) -> float:
-        """Transition cost, adapted by tonality and voicing density."""
+        """Transition cost, scales with tonality and voicing density."""
         jump_w = (
             tonality * self.jump_weight_tonal
             + (1.0 - tonality) * self.jump_weight_noisy

@@ -34,21 +34,21 @@ class MIDINote:
     channel: int = 0
 
 
-def write_midi(notes: list[MIDINote], ticks_per_beat: int, path: str) -> None:
-    """
-    Write a Type 0 MIDI file with the given notes.
-
-    Parameters
-    ----------
-    notes : list of MIDINote
-        Must be sorted by start_tick.
-    ticks_per_beat : int
-        Resolution (e.g., 480).
-    path : str
-        Output file path.
-    """
-    # Build a list of (absolute_tick, event_bytes) and sort by tick
+def write_midi(
+    notes: list[MIDINote],
+    ticks_per_beat: int,
+    path: str,
+    programs: dict[int, int] | None = None,
+) -> None:
+    """Write a Type 0 MIDI file. Notes must be sorted by start_tick.
+    programs: optional dict of channel -> GM program number (inserts at tick 0)."""
+    # collect (absolute_tick, event_bytes)
     events: list[tuple[int, bytes]] = []
+
+    # program changes at tick 0
+    if programs:
+        for ch, prog in sorted(programs.items()):
+            events.append((0, bytes([0xC0 | (ch & 0x0F), prog & 0x7F])))
 
     for n in notes:
         note_val = max(0, min(127, n.note))
@@ -60,10 +60,10 @@ def write_midi(notes: list[MIDINote], ticks_per_beat: int, path: str) -> None:
         # note_off
         events.append((n.end_tick, bytes([0x80 | ch, note_val, 0])))
 
-    # Sort by tick; note_off before note_on at same tick
+    # sort by tick (note_off before note_on at same tick)
     events.sort(key=lambda e: (e[0], e[1][0] & 0xF0 != 0x80))
 
-    # Build track data with delta times
+    # build track data with delta times
     track_data = bytearray()
     prev_tick = 0
     for tick, evt in events:
@@ -74,18 +74,18 @@ def write_midi(notes: list[MIDINote], ticks_per_beat: int, path: str) -> None:
         track_data.extend(evt)
         prev_tick = tick
 
-    # End-of-track meta event
+    # end-of-track
     track_data.extend(_var_len(0))
     track_data.extend(b'\xFF\x2F\x00')
 
-    # Set tempo meta event: 120 BPM = 500000 microseconds per beat
+    # tempo: 120 BPM = 500000 us/beat
     tempo_event = bytearray()
     tempo_event.extend(_var_len(0))               # delta = 0
     tempo_event.extend(b'\xFF\x51\x03')            # meta tempo, length 3
     tempo_event.extend(struct.pack('>I', 500000)[1:])  # 3 bytes, big-endian
     track_data = bytes(tempo_event) + bytes(track_data)
 
-    # Assemble file
+    # assemble file
     with open(path, 'wb') as f:
         # MThd header
         f.write(b'MThd')

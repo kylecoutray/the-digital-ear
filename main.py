@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-The Digital Ear — Streaming audio-to-MIDI melody extraction.
+The Digital Ear -- streaming audio-to-MIDI melody extraction.
 
-True streaming pipeline: reads audio in <=2048-sample blocks, processes each
-block through HPSS → pitch detection → online Viterbi → note tracking,
-then discards the block before reading the next one.
-
-Memory: ~31 MB constant regardless of audio length.
+Reads audio in <=2048-sample blocks, runs each through
+HPSS -> pitch detection -> online Viterbi -> note tracking,
+then drops the block. ~31 MB constant memory.
 """
 from __future__ import annotations
 
@@ -29,7 +27,7 @@ import numpy as np
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 def _midi_to_name(midi_num: int) -> str:
-    """Convert MIDI note number to human-readable name (e.g. 60 → C4)."""
+    """MIDI note number -> name, e.g. 60 -> C4."""
     octave = (midi_num // 12) - 1
     name = _NOTE_NAMES[midi_num % 12]
     return f"{name}{octave}"
@@ -57,6 +55,8 @@ class Args:
     dual: str
     wav: str
     min_note_sec: float
+    melody_prog: int
+    bg_prog: int
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -83,6 +83,8 @@ def parse_args(argv: list[str]) -> Args:
     p.add_argument("--dual", type=str, default="", help="Output stereo WAV: left=original, right=synthesized MIDI")
     p.add_argument("--wav", type=str, default="", help="Export MIDI as standalone synthesized WAV file")
     p.add_argument("--min-note-sec", dest="min_note_sec", type=float, default=0.15, help="Minimum note duration in seconds")
+    p.add_argument("--melody-prog", dest="melody_prog", type=int, default=0, help="GM program for melody channel (0=piano)")
+    p.add_argument("--bg-prog", dest="bg_prog", type=int, default=26, help="GM program for background poly channels (26=steel guitar)")
 
     ns = p.parse_args(argv)
 
@@ -133,6 +135,8 @@ def parse_args(argv: list[str]) -> Args:
         dual=ns.dual,
         wav=ns.wav,
         min_note_sec=ns.min_note_sec,
+        melody_prog=ns.melody_prog,
+        bg_prog=ns.bg_prog,
     )
 
 
@@ -141,17 +145,18 @@ def _feed_poly_voices(
     cand_buf: deque,
     poly_melodies: list[MelodyExtractor],
     poly_trackers: list[NoteTracker],
+    poly_note_buf: list[list[NoteEvent]],
 ) -> None:
-    """Feed the oldest buffered candidates (filtered) to secondary voices."""
+    """Pop oldest buffered candidates and feed filtered results to secondary voices."""
     if not cand_buf:
         return
     old_cands, old_ton = cand_buf.popleft()
 
-    # Build cumulative exclusion: primary + previous secondary decisions
+    # exclude primary + already-assigned secondary pitches
     excluded: list[float | None] = [primary_hz]
 
     for vi, (sec_mel, sec_trk) in enumerate(zip(poly_melodies, poly_trackers)):
-        # Filter candidates: remove pitches within 2 semitones of excluded voices
+        # skip pitches within 2 semitones of excluded voices
         filtered: list[tuple[float, float]] = []
         for hz, conf in old_cands:
             too_close = False
@@ -168,7 +173,7 @@ def _feed_poly_voices(
 
         sec_f0 = sec_mel.push(filtered, old_ton)
         if sec_f0 is not None:
-            sec_trk.push(sec_f0)
+            poly_note_buf[vi].extend(sec_trk.push(sec_f0))
             excluded.append(sec_f0)
 
 
@@ -177,12 +182,11 @@ def _write_synth_wav(
     note_events: list[NoteEvent],
     sr: int,
 ) -> None:
-    """Write a mono WAV file synthesized from MIDI note events."""
+    """Synthesize note events to a mono WAV."""
     if not note_events:
         return
-    # Figure out total duration from the last note end
     end_sec = max(e.end_sec for e in note_events)
-    n_samples = int(end_sec * sr) + sr  # +1s tail for release
+    n_samples = int(end_sec * sr) + sr  # +1s for release tail
     synth = np.zeros(n_samples, dtype=np.float32)
     attack = int(0.01 * sr)
     release = int(0.03 * sr)
@@ -205,7 +209,7 @@ def _write_synth_wav(
             env[-rel:] = np.linspace(1.0, 0.0, rel)
         synth[start:end] += tone * env
 
-    # Normalize to -3 dBFS
+    # normalize to -3dBFS
     peak = np.abs(synth).max()
     if peak > 0:
         synth *= 0.7 / peak
@@ -225,8 +229,7 @@ def _write_dual_wav(
     sr: int,
     block_size: int,
 ) -> None:
-    """Write stereo WAV: left = original audio, right = synthesized MIDI tones."""
-    # Re-decode original audio to get the full waveform for the left channel
+    """Stereo WAV: left=original, right=synth."""
     _, blocks = stream_m4a_blocks_ffmpeg(in_path, block_size, target_sr=sr)
     chunks: list[np.ndarray] = []
     for blk in blocks:
@@ -235,10 +238,10 @@ def _write_dual_wav(
     n_samples = len(original)
     duration = n_samples / float(sr)
 
-    # Synthesize right channel: sine tones from note events with ADSR envelope
+    # synth right channel
     synth = np.zeros(n_samples, dtype=np.float32)
-    attack = int(0.01 * sr)   # 10ms attack
-    release = int(0.03 * sr)  # 30ms release
+    attack = int(0.01 * sr)
+    release = int(0.03 * sr)
 
     for evt in note_events:
         freq = 440.0 * (2.0 ** ((evt.note - 69) / 12.0))
@@ -253,7 +256,7 @@ def _write_dual_wav(
         t = np.arange(length, dtype=np.float32) / sr
         tone = 0.4 * np.sin(2.0 * np.pi * freq * t)
 
-        # Simple ADSR envelope (attack + sustain + release)
+        # envelope
         env = np.ones(length, dtype=np.float32)
         att = min(attack, length)
         rel = min(release, length - att)
@@ -264,7 +267,7 @@ def _write_dual_wav(
 
         synth[start:end] += tone * env
 
-    # Normalize both channels to -3 dBFS peak so they're loud and matched
+    # normalize to -3dBFS
     orig_peak = np.abs(original).max()
     if orig_peak > 0:
         original *= 0.7 / orig_peak
@@ -273,18 +276,18 @@ def _write_dual_wav(
     if synth_peak > 0:
         synth *= 0.7 / synth_peak
 
-    # Write stereo 16-bit WAV
+    # write stereo wav
     with wave.open(dual_path, "wb") as wf:
         wf.setnchannels(2)
         wf.setsampwidth(2)
         wf.setframerate(sr)
 
-        # Interleave left (original) and right (synth)
+        # interleave L/R
         stereo = np.empty(n_samples * 2, dtype=np.float32)
         stereo[0::2] = original
         stereo[1::2] = synth
 
-        # Convert to int16
+        # to int16
         pcm = np.clip(stereo * 32767.0, -32768, 32767).astype(np.int16)
         wf.writeframes(pcm.tobytes())
 
@@ -308,7 +311,7 @@ def main(argv: list[str]) -> int:
     input_sr = probe_sample_rate(args.in_path)
     out_sr, blocks = stream_m4a_blocks_ffmpeg(args.in_path, args.block_size, target_sr=args.target_sr)
 
-    # ---- Instantiate all streaming components ----
+    # pipeline setup
     pre = Preprocessor(fs=float(out_sr), dc_fc=args.dc_fc, hp_fc=args.hp_fc, lp_fc=args.lp_fc)
     hpss = HPSS(n_fft=args.n_fft, hop=args.hop, kernel_h=31, kernel_p=31, power=2.0)
     fx = FrameExtractor(n_fft=args.n_fft, hop=args.hop)
@@ -324,11 +327,8 @@ def main(argv: list[str]) -> int:
     hop_sec = args.hop / float(out_sr)
     n_top = 5 if not args.poly else 8
 
-    # Latency compensation: the streaming HPSS drops the first kernel_h//2
-    # frames, so harmonic stream sample 0 = original audio sample 15*hop.
-    # To map harmonic-stream time → original-audio time we ADD the HPSS
-    # offset.  Since latency_sec is subtracted in NoteTracker, we negate it.
-    # The n_fft/(2*sr) term corrects for the Hann-window centre.
+    # HPSS drops first kernel_h//2 frames, so we correct for that offset
+    # plus the Hann window centre shift. Negated because NoteTracker subtracts it.
     hpss_delay_sec = (hpss.kernel_h // 2) * hop_sec
     latency_sec = args.n_fft / (2.0 * float(out_sr)) - hpss_delay_sec
     melody = MelodyExtractor(hop_sec=hop_sec)
@@ -337,7 +337,7 @@ def main(argv: list[str]) -> int:
         min_note_sec=args.min_note_sec, merge_gap_sec=0.12, latency_sec=latency_sec,
     )
 
-    # Polyphonic mode: secondary voice extractors
+    # poly mode -- secondary voices
     n_poly_voices = 2 if args.poly else 0
     poly_melodies: list[MelodyExtractor] = []
     poly_trackers: list[NoteTracker] = []
@@ -347,16 +347,17 @@ def main(argv: list[str]) -> int:
             hop_sec=hop_sec, median_window=15,
             min_note_sec=0.20, merge_gap_sec=0.15, latency_sec=latency_sec,
         ))
-    # Buffer candidates during primary Viterbi lag so we can filter
-    # and feed to secondary voices when the primary emits decisions
+    # buffer candidates during primary Viterbi lag for secondary voice filtering
     cand_buf: deque[tuple[list[tuple[float, float]], float]] = deque()
+    # poly note accumulator
+    poly_note_bufs: list[list[NoteEvent]] = [[] for _ in range(n_poly_voices)]
 
     csv_f = None
     if args.dump_frames:
         csv_f = open(args.dump_frames, "w", encoding="utf-8")
         csv_f.write("frame_idx,time_sec,f0_hz,conf,rms,voiced\n")
 
-    # Buffer per-frame info so we can write CSV when Viterbi emits decisions
+    # buffer for CSV dump
     csv_buf: deque[tuple[int, float, list[tuple[float,float]], float]] = deque()
 
     block_count = 0
@@ -366,11 +367,13 @@ def main(argv: list[str]) -> int:
     stream_sample_index = 0
     melody_frame_count = 0
 
-    # ---- STREAMING LOOP ----
+    note_events: list[NoteEvent] = []
+
+    # --- streaming loop ---
     _mark_stage("decoding")
     print("STAGE=processing", flush=True)
 
-    # Debug stats accumulators
+    # debug stats
     _voiced_frames = 0
     _unvoiced_frames = 0
     _conf_sum = 0.0
@@ -383,15 +386,15 @@ def main(argv: list[str]) -> int:
             max_len_seen = n
         assert n <= args.block_size, f"Block too large: {n} > {args.block_size}"
 
-        # Step 1: Preprocess (DC block + HPF + LPF)
+        # preprocess (dc block + hpf + lpf)
         y = pre.process(blk)
 
-        # Step 2: Feed into streaming HPSS
+        # hpss
         hpss.push(y)
 
-        # Step 3: Consume harmonic audio blocks from HPSS
+        # consume harmonic frames
         for harmonic_block in hpss.pop_harmonic():
-            # Step 4: Feed harmonic audio into frame extractor
+            # extract frames
             for frame, frame_start in fx.push_indexed(harmonic_block, stream_sample_index):
                 frame_rms = rms(frame)
 
@@ -401,23 +404,23 @@ def main(argv: list[str]) -> int:
                 else:
                     candidates, tonality = det.estimate_candidates(frame, n_top=n_top, min_conf=1.5)
 
-                # Step 5: Online Viterbi melody extraction
-                f0_hz = melody.push(candidates, tonality)
+                # viterbi melody (primary sees top-5 regardless of poly mode)
+                f0_hz = melody.push(candidates[:5], tonality)
 
-                # Buffer frame info for CSV dump (written when Viterbi emits)
+                # csv dump
                 if csv_f is not None:
                     csv_buf.append((frame_count, frame_start / float(out_sr), candidates, frame_rms))
 
-                # Buffer candidates for polyphonic secondary voices
+                # poly candidate buffer
                 if args.poly:
                     cand_buf.append((candidates, tonality))
 
-                # Step 6: Note tracking (delayed by Viterbi lag)
+                # note tracking (delayed by viterbi lag)
                 if f0_hz is not None:
-                    tracker.push(f0_hz)
+                    note_events.extend(tracker.push(f0_hz))
                     melody_frame_count += 1
 
-                    # Write CSV: the Viterbi decision for the oldest buffered frame
+                    # write CSV row for oldest buffered frame
                     if csv_f is not None and csv_buf:
                         fi, t_sec, cands, frms = csv_buf.popleft()
                         top_hz = f0_hz if f0_hz else 0.0
@@ -427,13 +430,14 @@ def main(argv: list[str]) -> int:
                         voiced = 1 if f0_hz and f0_hz > 0 else 0
                         csv_f.write(f"{fi},{t_sec:.4f},{top_hz:.2f},{top_conf:.2f},{frms:.6f},{voiced}\n")
 
-                    # Feed secondary voices with filtered candidates
+                    # feed secondary voices
                     if args.poly and cand_buf:
                         _feed_poly_voices(
-                            f0_hz, cand_buf, poly_melodies, poly_trackers
+                            f0_hz, cand_buf, poly_melodies, poly_trackers,
+                            poly_note_bufs,
                         )
 
-                # Accumulate debug voicing stats
+                # voicing stats
                 if candidates:
                     _voiced_frames += 1
                     _conf_sum += candidates[0][1]
@@ -444,12 +448,12 @@ def main(argv: list[str]) -> int:
 
             stream_sample_index += len(harmonic_block)
 
-    # ---- FLUSH PIPELINE ----
+    # ---- flush pipeline ----
     _mark_stage("processing")
     print("STAGE=flushing", flush=True)
     perf.sample()
 
-    # Flush HPSS remaining frames
+    # flush hpss
     for harmonic_block in hpss.flush():
         for frame, frame_start in fx.push_indexed(harmonic_block, stream_sample_index):
             frame_rms = rms(frame)
@@ -458,20 +462,20 @@ def main(argv: list[str]) -> int:
             else:
                 candidates, tonality = det.estimate_candidates(frame, n_top=n_top, min_conf=1.5)
 
-            f0_hz = melody.push(candidates, tonality)
+            f0_hz = melody.push(candidates[:5], tonality)
             if args.poly:
                 cand_buf.append((candidates, tonality))
             if f0_hz is not None:
-                tracker.push(f0_hz)
+                note_events.extend(tracker.push(f0_hz))
                 melody_frame_count += 1
                 if args.poly and cand_buf:
-                    _feed_poly_voices(f0_hz, cand_buf, poly_melodies, poly_trackers)
+                    _feed_poly_voices(f0_hz, cand_buf, poly_melodies, poly_trackers, poly_note_bufs)
             frame_count += 1
         stream_sample_index += len(harmonic_block)
 
-    # Flush Viterbi remaining lagged frames
+    # flush viterbi
     for f0_hz in melody.flush():
-        tracker.push(f0_hz)
+        note_events.extend(tracker.push(f0_hz))
         melody_frame_count += 1
         if csv_f is not None and csv_buf:
             fi, t_sec, cands, frms = csv_buf.popleft()
@@ -480,27 +484,32 @@ def main(argv: list[str]) -> int:
             voiced = 1 if f0_hz and f0_hz > 0 else 0
             csv_f.write(f"{fi},{t_sec:.4f},{top_hz:.2f},{top_conf:.2f},{frms:.6f},{voiced}\n")
         if args.poly and cand_buf:
-            _feed_poly_voices(f0_hz, cand_buf, poly_melodies, poly_trackers)
+            _feed_poly_voices(f0_hz, cand_buf, poly_melodies, poly_trackers, poly_note_bufs)
 
-    # Flush secondary voice Viterbi and trackers
+    # flush secondary voices
     poly_events: list[NoteEvent] = []
     for vi in range(n_poly_voices):
-        # Drain remaining buffered candidates
+        # notes collected so far
+        vi_notes: list[NoteEvent] = poly_note_bufs[vi]
+        # drain leftover candidates
         while cand_buf:
             old_cands, old_ton = cand_buf.popleft()
             sec_f0 = poly_melodies[vi].push(old_cands, old_ton)
             if sec_f0 is not None:
-                poly_trackers[vi].push(sec_f0)
+                vi_notes.extend(poly_trackers[vi].push(sec_f0))
         for sec_f0 in poly_melodies[vi].flush():
-            poly_trackers[vi].push(sec_f0)
-        poly_events.extend(poly_trackers[vi].flush())
+            vi_notes.extend(poly_trackers[vi].push(sec_f0))
+        vi_notes.extend(poly_trackers[vi].flush())
+        for evt in vi_notes:
+            evt._voice = vi  # tag with voice index for channel assignment
+        poly_events.extend(vi_notes)
 
-    # Flush note tracker
-    note_events = tracker.flush()
+    # flush tracker
+    note_events.extend(tracker.flush())
 
     perf.sample()
 
-    # ---- MIDI OUTPUT ----
+    # midi output
     _mark_stage("flushing")
     print("STAGE=writing_midi", flush=True)
     ticks_per_beat = 480
@@ -514,21 +523,26 @@ def main(argv: list[str]) -> int:
             velocity=evt.velocity,
         ))
 
-    # Add polyphonic voices (lower velocity for secondary)
+    # bg voices quieter
     for evt in poly_events:
+        vi = getattr(evt, '_voice', 0)
+        ch = vi + 1
+        vel = 40 if vi == 0 else 30
         midi_notes.append(MIDINote(
             note=evt.note,
             start_tick=seconds_to_ticks(evt.start_sec, ticks_per_beat, bpm),
             end_tick=seconds_to_ticks(evt.end_sec, ticks_per_beat, bpm),
-            velocity=60,
+            velocity=vel,
+            channel=ch,
         ))
 
     midi_notes.sort(key=lambda m: m.start_tick)
-    write_midi(midi_notes, ticks_per_beat, args.out_path)
+    programs = {0: args.melody_prog, 1: args.bg_prog, 2: args.bg_prog}
+    write_midi(midi_notes, ticks_per_beat, args.out_path, programs=programs)
 
     _mark_stage("writing_midi")
 
-    # ---- SYNTH WAV OUTPUT (MIDI rendered as .wav) ----
+    # synth wav output
     if args.wav:
         print("STAGE=dual_wav", flush=True)
         all_events = list(note_events)
@@ -538,7 +552,7 @@ def main(argv: list[str]) -> int:
         print(f"WAV_OUTPUT={args.wav}")
         _mark_stage("synth_wav")
 
-    # ---- DUAL OUTPUT (stereo WAV: left=original, right=synth) ----
+    # --- dual output (stereo: left=original, right=synth)
     if args.dual:
         print("STAGE=dual_wav", flush=True)
         all_events = list(note_events)
@@ -552,7 +566,7 @@ def main(argv: list[str]) -> int:
 
     print("STAGE=complete", flush=True)
 
-    # ---- REPORTING ----
+    # reporting
     print(f"INPUT_FILE={args.in_path}")
     print(f"OUTPUT_FILE={args.out_path}")
     print(f"BLOCK_SIZE={args.block_size}")
@@ -570,6 +584,9 @@ def main(argv: list[str]) -> int:
     print(f"FRAMES_PROCESSED={frame_count}")
     n_primary = len(note_events)
     n_poly = len(poly_events)
+    print(f"MELODY_PROG={args.melody_prog}")
+    if args.poly:
+        print(f"BG_PROG={args.bg_prog}")
     print(f"NOTES_DETECTED={len(midi_notes)}")
     if args.poly:
         print(f"PRIMARY_NOTES={n_primary}")
@@ -578,39 +595,39 @@ def main(argv: list[str]) -> int:
     print(f"PEAK_RSS_MB={peak_mb:.2f}")
 
     if args.debug:
-        # ── Note summary ──
+        # note summary
         all_note_events = list(note_events) + list(poly_events)
         if all_note_events:
             lo = min(e.note for e in all_note_events)
             hi = max(e.note for e in all_note_events)
             durs = [e.end_sec - e.start_sec for e in all_note_events]
             avg_dur = sum(durs) / len(durs)
-            print(f"\n── Note Summary ──")
+            print(f"\n-- Note Summary --")
             print(f"  Range  {_midi_to_name(lo)} ({lo}) → {_midi_to_name(hi)} ({hi})")
             print(f"  Count  {len(all_note_events)}  |  Avg duration {avg_dur:.3f}s")
 
-        # ── Voicing statistics ──
+        # voicing stats
         total_f = _voiced_frames + _unvoiced_frames
         if total_f > 0:
             pct = 100.0 * _voiced_frames / total_f
             avg_conf = _conf_sum / _voiced_frames if _voiced_frames > 0 else 0
-            print(f"\n── Pitch & Voicing ──")
+            print(f"\nPitch & Voicing")
             print(f"  Voiced frames    {_voiced_frames}/{total_f} ({pct:.1f}%)")
             print(f"  Avg confidence   {avg_conf:.2f}")
             voiced_sec = _voiced_frames * hop_sec
             print(f"  Voiced time      {voiced_sec:.2f}s")
 
-        # ── Speed & Memory ──
+        # perf
         audio_dur = total_samples / float(out_sr) if out_sr > 0 else 0
         if audio_dur > 0:
             rtf = elapsed_s / audio_dur
             speed = audio_dur / elapsed_s if elapsed_s > 0 else 0
-            print(f"\n── Speed & Memory ──")
+            print(f"\n-- Speed & Memory --")
             print(f"  Audio duration   {audio_dur:.2f}s")
             print(f"  Processing time  {elapsed_s:.2f}s")
             print(f"  Real-time factor {rtf:.2f}x  ({speed:.1f}x faster than real-time)")
             print(f"  Peak memory      {peak_mb:.1f} MB")
-            # Quick-glance constraint check
+            # pass/fail check
             speed_ok = speed >= 4.0
             mem_ok = peak_mb < 500
             if speed_ok and mem_ok:
@@ -627,8 +644,8 @@ def main(argv: list[str]) -> int:
                     fails.append(f"{peak_mb:.1f} MB RAM")
                 print(f"\033[31m  ✗ FAIL  {' · '.join(fails)}\033[0m")
 
-        # ── Pipeline timing breakdown ──
-        print(f"\n── Pipeline Timing ──")
+        # timing breakdown
+        print(f"\nPipeline Timing")
         for stage, secs in _stage_times.items():
             bar_len = int(min(secs / max(elapsed_s, 0.001) * 30, 30))
             bar = "█" * bar_len

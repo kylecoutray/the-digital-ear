@@ -4,7 +4,7 @@ A streaming audio-to-MIDI extraction pipeline built for [Paradromics](https://pa
 
 Built to eventually run on a Raspberry Pi in real time.
 
-> **[Watch the walkthrough (YouTube)](youtube.com)** · **[Slide deck (Google Slides)](https://docs.google.com/presentation/d/1e4HgQPgvp3ZzGGHwky6CwUFruW1vtq-2nBTBd-b3gio/edit?usp=sharing)**
+> **[Watch the walkthrough (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Slide deck (Google Slides)](https://docs.google.com/presentation/d/1e4HgQPgvp3ZzGGHwky6CwUFruW1vtq-2nBTBd-b3gio/edit?usp=sharing)**
 
 ![GUI Screenshot](other/gui_screenshot.png)
 
@@ -112,7 +112,6 @@ python gui.py
 the-digital-ear/
 ├── main.py                     # CLI entry point
 ├── gui.py                      # Tkinter GUI
-├── generate_spectrogram.py     # Spectrogram visualization tool
 │
 ├── digital_ear/
 │   ├── audio_io.py             # ffmpeg streaming decoder
@@ -125,27 +124,10 @@ the-digital-ear/
 │   ├── midi_writer.py          # Raw binary MIDI writer (no deps)
 │   └── perf.py                 # Performance/memory profiler
 │
-├── tests/
-│   ├── test_hps_pitch.py
-│   ├── test_hps_unvoiced.py
-│   └── test_tone_fft.py
+├── other/                      # Test scripts, spectrogram generation, etc.
 │
 └── outputs/                    # Generated MIDI, WAV, spectrograms
 ```
-
----
-
-## Spectrogram walkthrough
-
-Generated with `generate_spectrogram.py`, these show what happens at each pipeline stage on the same audio clip:
-
-| Stage | What you're seeing |
-|---|---|
-| **1. Raw audio** | Unprocessed FFT — everything mixed together |
-| **2. Preprocessed** | After DC block + HPF + LPF — rumble and highs removed |
-| **3. After HPSS** | Harmonic stream only — percussion stripped out |
-| **4. Pitch overlay** | Extracted pitch contour (cyan) on the harmonic spectrogram |
-| **5. MIDI piano roll** | Final quantized note events |
 
 ---
 
@@ -157,17 +139,6 @@ Generated with `generate_spectrogram.py`, these show what happens at each pipeli
 | Pitch ambiguity / harmonics | Salamon & Gomez, IEEE 2012 | Harmonic salience function |
 | Frame-to-frame pitch flicker | Mauch & Dixon, ICASSP 2014 | HMM + Viterbi smoothing |
 | Static parameters fail on mixed audio | *(custom)* | Density-adaptive transition/emission costs |
-
----
-
-## What's next (Stage 2)
-
-The DSP pipeline is fully streaming and constant-memory. What's left is the I/O layer:
-
-- **Live audio input** — Replace file decoding with microphone / hardware stream
-- **Real-time MIDI output** — Emit note events to a MIDI port as they close (~860 ms latency)
-- **NoteTracker bounded memory** — Convert growing lists to bounded deques (same pattern as every other stage)
-- **RPi benchmarking** — Verify the pipeline runs faster than real-time on target hardware
 
 ---
 
