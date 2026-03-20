@@ -70,12 +70,29 @@ class VizFrame:
     notes: list = field(default_factory=list)
 
 
-# -- sine synth (from live_musicbox.py) --
+# -- ghost synth (detuned layered oscillators + vibrato) --
 
-class SineSynth:
-    """Thread-safe sine synth with pitch-following and 2s safety timeout."""
+class GhostSynth:
+    """Ghostly synth — 3 detuned oscillators with slow vibrato.
+
+    Same interface as SineSynth (set_pitch, play_note, stop, generate)
+    so it drops right into PipelineRunner.
+
+    Sound: three sines slightly detuned from each other (~4 cents apart),
+    slow LFO vibrato on the center pitch, softer attack/release for a
+    wavering, haunted music-box feel.
+    """
 
     NOTE_MAX_SEC = 3.0
+
+    # detune offsets in semitones (center, slightly flat, slightly sharp)
+    DETUNE = [0.0, -0.04, +0.04]
+    # per-oscillator amplitude weights (center louder, sides softer)
+    VOICE_AMP = [0.45, 0.30, 0.30]
+
+    # vibrato
+    VIB_RATE = 4.5    # Hz — slow wavering
+    VIB_DEPTH = 0.003  # semitones of pitch wobble (~5 cents)
 
     def __init__(self, sr: int = SR):
         self.sr = sr
@@ -83,20 +100,22 @@ class SineSynth:
         self.muted: bool = False
 
         self._freq: float = 0.0
-        self._phase: float = 0.0
+        self._phases: list[float] = [0.0, 0.0, 0.0]
+        self._vib_phase: float = 0.0
         self._amplitude: float = 0.0
         self._target_amp: float = 0.0
         self._note_end_sample: int = 0
         self._sample_counter: int = 0
 
-        self._attack_coeff = 1.0 - math.exp(-2.0 * math.pi * 30.0 / sr)
-        self._release_coeff = 1.0 - math.exp(-2.0 * math.pi * 20.0 / sr)
+        # slower attack/release than SineSynth for ghostly feel
+        self._attack_coeff = 1.0 - math.exp(-2.0 * math.pi * 12.0 / sr)
+        self._release_coeff = 1.0 - math.exp(-2.0 * math.pi * 6.0 / sr)
 
     def set_pitch(self, f0_hz: float):
         with self._lock:
             if f0_hz > 20:
                 self._freq = f0_hz
-                self._target_amp = 0.30
+                self._target_amp = 0.28
                 self._note_end_sample = self._sample_counter + int(2.0 * self.sr)
             else:
                 self._target_amp = 0.0
@@ -106,7 +125,7 @@ class SineSynth:
         freq = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
         with self._lock:
             self._freq = freq
-            self._target_amp = 0.30
+            self._target_amp = 0.28
             self._note_end_sample = self._sample_counter + int(duration_sec * self.sr)
 
     def stop(self):
@@ -126,30 +145,52 @@ class SineSynth:
         with self._lock:
             freq = self._freq
             amp = self._amplitude
-            phase = self._phase
+            phases = self._phases[:]
+            vib_phase = self._vib_phase
             target_amp = self._target_amp
             note_end = self._note_end_sample
             sc = self._sample_counter
 
+        two_pi = 2.0 * math.pi
+        vib_inc = two_pi * self.VIB_RATE / self.sr
+
         for i in range(frames):
             if sc + i >= note_end:
                 target_amp = 0.0
+
+            # smooth amplitude
             if target_amp > amp:
                 amp += self._attack_coeff * (target_amp - amp)
             else:
                 amp += self._release_coeff * (target_amp - amp)
 
             if amp > 0.001 and freq > 20:
-                out[i] = amp * math.sin(phase)
-                phase += 2.0 * math.pi * freq / self.sr
-                if phase > 2.0 * math.pi:
-                    phase -= 2.0 * math.pi
+                # vibrato LFO (shared across voices)
+                vib = self.VIB_DEPTH * math.sin(vib_phase)
+                vib_phase += vib_inc
+                if vib_phase > two_pi:
+                    vib_phase -= two_pi
+
+                # sum 3 detuned voices
+                sample = 0.0
+                for v in range(3):
+                    # detune in semitones -> freq multiplier
+                    detune_semi = self.DETUNE[v] + vib
+                    v_freq = freq * (2.0 ** (detune_semi / 12.0))
+
+                    sample += self.VOICE_AMP[v] * math.sin(phases[v])
+                    phases[v] += two_pi * v_freq / self.sr
+                    if phases[v] > two_pi:
+                        phases[v] -= two_pi
+
+                out[i] = amp * sample
             else:
                 out[i] = 0.0
 
         with self._lock:
             self._amplitude = amp
-            self._phase = phase
+            self._phases = phases
+            self._vib_phase = vib_phase
             self._target_amp = target_amp
             self._sample_counter = sc + frames
 
@@ -165,7 +206,7 @@ class PipelineRunner:
         self,
         audio_q: queue.Queue,
         viz_q: queue.Queue,
-        synth: Optional[SineSynth] = None,
+        synth: Optional[GhostSynth] = None,
         fmin: float = 80.0,
         fmax: float = 1000.0,
         conf_th: float = 1.0,
@@ -464,7 +505,7 @@ def main():
     viz_q: queue.Queue = queue.Queue(maxsize=128)
 
     # synth
-    synth = None if args.no_synth else SineSynth()
+    synth = None if args.no_synth else GhostSynth()
     out_stream = None
 
     if synth:
