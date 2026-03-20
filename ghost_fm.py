@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
 The Digital Ear — Ghost FM
-Headless FM radio → melody extraction → synth re-synthesis.
+Headless FM radio -> melody extraction -> synth re-synthesis.
 
 Receives over-the-air FM via RTL-SDR, runs the full Digital Ear
 pipeline, and re-synthesizes detected melody as sine tones.
 
-  python ghost_fm.py --freq 99.5M
+  python ghost_fm.py --freq 89.9M
   python ghost_fm.py --freq 101.1M --output-device 2
   python ghost_fm.py --list-devices
+
+Interactive controls (while running):
+  w/s     confidence up/down
+  a/d     noise gate up/down
+  m       mute/unmute synth
+  q       quit
 """
 from __future__ import annotations
 
@@ -16,11 +22,14 @@ import argparse
 import math
 import os
 import queue
+import select
 import signal
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -61,7 +70,7 @@ class VizFrame:
     notes: list = field(default_factory=list)
 
 
-# -- sine synth (copied from live_musicbox.py) --
+# -- sine synth (from live_musicbox.py) --
 
 class SineSynth:
     """Thread-safe sine synth with pitch-following and 2s safety timeout."""
@@ -147,7 +156,7 @@ class SineSynth:
         return out
 
 
-# -- pipeline runner (copied from live_musicbox.py) --
+# -- pipeline runner (from live_musicbox.py) --
 
 class PipelineRunner:
     """Full Digital Ear pipeline in a background thread."""
@@ -297,31 +306,38 @@ class PipelineRunner:
 # -- FM radio reader --
 
 class FMReader:
-    """Reads demodulated FM audio from rtl_fm subprocess.
+    """Reads demodulated FM audio from rtl_fm subprocess."""
 
-    Spawns rtl_fm, reads signed 16-bit LE PCM from stdout,
-    converts to float32 numpy arrays, pushes to audio queue.
-    """
-
-    def __init__(self, freq: str, audio_q: queue.Queue, block_size: int = BLOCK_SIZE):
+    def __init__(self, freq: str, audio_q: queue.Queue,
+                 block_size: int = BLOCK_SIZE, squelch: int = 60,
+                 gain: Optional[int] = None):
         self.freq = freq
         self.audio_q = audio_q
         self.block_size = block_size
+        self.squelch = squelch
+        self.gain = gain
         self.running = False
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
 
-    def start(self):
+    def _build_cmd(self):
         cmd = [
             "rtl_fm",
             "-f", self.freq,
             "-M", "fm",
-            "-s", "170k",
+            "-s", "200k",
             "-r", str(SR),
             "-A", "fast",
-            "-l", "0",
-            "-",
+            "-l", str(self.squelch),
+            "-E", "deemp",
         ]
+        if self.gain is not None:
+            cmd += ["-g", str(self.gain)]
+        cmd.append("-")
+        return cmd
+
+    def start(self):
+        cmd = self._build_cmd()
 
         try:
             self._proc = subprocess.Popen(
@@ -338,7 +354,7 @@ class FMReader:
         self._thread.start()
 
     def _read_loop(self):
-        bytes_per_block = self.block_size * 2  # 16-bit = 2 bytes per sample
+        bytes_per_block = self.block_size * 2  # 16-bit = 2 bytes/sample
         stream = self._proc.stdout
 
         while self.running and self._proc.poll() is None:
@@ -346,10 +362,9 @@ class FMReader:
             if not raw:
                 break
 
-            # S16LE -> float32 in [-1, 1]
+            # S16LE -> float32 [-1, 1]
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-            # handle partial reads
             if len(samples) < self.block_size:
                 padded = np.zeros(self.block_size, dtype=np.float32)
                 padded[:len(samples)] = samples
@@ -358,7 +373,7 @@ class FMReader:
             try:
                 self.audio_q.put_nowait(samples)
             except queue.Full:
-                pass  # pipeline behind, drop block
+                pass
 
     def stop(self):
         self.running = False
@@ -372,8 +387,32 @@ class FMReader:
     def set_freq(self, freq: str):
         """Change frequency by restarting rtl_fm."""
         self.stop()
+        time.sleep(0.3)
         self.freq = freq
         self.start()
+
+
+# -- keyboard input (non-blocking, raw terminal) --
+
+class KeyReader:
+    """Non-blocking single-keypress reader using raw terminal mode."""
+
+    def __init__(self):
+        self._old_settings = None
+
+    def start(self):
+        self._old_settings = termios.tcgetattr(sys.stdin)
+        tty.setraw(sys.stdin.fileno())
+
+    def stop(self):
+        if self._old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
+
+    def get_key(self) -> Optional[str]:
+        """Return a key if one is waiting, else None."""
+        if select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.read(1)
+        return None
 
 
 # -- main --
@@ -383,12 +422,28 @@ def main():
         description="The Digital Ear — Ghost FM Synthesizer",
     )
     parser.add_argument(
-        "--freq", type=str, default="99.5M",
-        help="FM frequency, e.g. 99.5M, 101.1M (default: 99.5M)",
+        "--freq", type=str, default="89.9M",
+        help="FM frequency, e.g. 89.9M, 101.1M (default: 89.9M)",
     )
     parser.add_argument(
         "--output-device", type=int, default=None,
         help="Audio output device index for synth (use --list-devices)",
+    )
+    parser.add_argument(
+        "--conf", type=float, default=1.0,
+        help="Starting confidence threshold (default: 1.0 = off)",
+    )
+    parser.add_argument(
+        "--rms", type=float, default=0.003,
+        help="Starting RMS noise gate (default: 0.003)",
+    )
+    parser.add_argument(
+        "--squelch", type=int, default=60,
+        help="rtl_fm squelch level, 0=off (default: 60)",
+    )
+    parser.add_argument(
+        "--gain", type=int, default=None,
+        help="rtl_fm gain, omit for auto (try 30-50)",
     )
     parser.add_argument(
         "--no-synth", action="store_true",
@@ -412,7 +467,6 @@ def main():
     synth = None if args.no_synth else SineSynth()
     out_stream = None
 
-    # start synth output stream
     if synth:
         def output_callback(outdata, frames, time_info, status):
             outdata[:, 0] = synth.generate(frames)
@@ -432,24 +486,104 @@ def main():
             print("Try --list-devices to find the right output device index")
             sys.exit(1)
 
-    # start FM reader
-    fm = FMReader(args.freq, audio_q)
+    # FM reader
+    fm = FMReader(args.freq, audio_q, squelch=args.squelch, gain=args.gain)
     fm.start()
-    print(f"Tuned to FM {args.freq} — receiving...")
 
-    # start pipeline
-    pipeline = PipelineRunner(audio_q, viz_q, synth=synth)
+    # pipeline
+    pipeline = PipelineRunner(audio_q, viz_q, synth=synth,
+                              conf_th=args.conf, rms_th=args.rms)
     pipeline_thread = threading.Thread(target=pipeline.run, daemon=True)
     pipeline_thread.start()
 
-    # clean shutdown
+    # keyboard reader
+    keys = KeyReader()
+
+    # shutdown
     shutting_down = threading.Event()
 
     def shutdown(signum=None, frame=None):
         if shutting_down.is_set():
             return
         shutting_down.set()
-        print("\nShutting down...")
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    # print header
+    print(f"\n  The Digital Ear — Ghost FM")
+    print(f"  Tuned to FM {args.freq}  |  synth {'ON' if synth else 'OFF'}")
+    print(f"  ──────────────────────────────────────────────")
+    print(f"  w/s  confidence ↑↓    a/d  noise gate ↑↓")
+    print(f"  m    mute synth       q    quit")
+    print(f"  ──────────────────────────────────────────────\n")
+
+    note_count = 0
+    last_print = 0.0
+    muted = False
+
+    keys.start()
+
+    try:
+        while not shutting_down.is_set():
+            # handle keypresses
+            key = keys.get_key()
+            if key:
+                if key == 'q':
+                    break
+                elif key == 'w':
+                    pipeline.conf_th = min(25.0, pipeline.conf_th + 0.5)
+                elif key == 's':
+                    pipeline.conf_th = max(1.0, pipeline.conf_th - 0.5)
+                elif key == 'd':
+                    pipeline.rms_th = min(0.1, pipeline.rms_th + 0.002)
+                elif key == 'a':
+                    pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
+                elif key == 'm':
+                    muted = not muted
+                    pipeline.synth_muted = muted
+                    if synth:
+                        synth.muted = muted
+
+            # drain viz queue
+            latest_vf = None
+            while True:
+                try:
+                    vf = viz_q.get_nowait()
+                    note_count += len(vf.notes)
+                    latest_vf = vf
+                except queue.Empty:
+                    break
+
+            # status line ~4x/sec
+            now = time.monotonic()
+            if now - last_print >= 0.25 and latest_vf:
+                vf = latest_vf
+                if vf.current_midi > 0:
+                    note_str = f"{midi_to_name(vf.current_midi):>4s} {vf.current_f0:6.1f} Hz"
+                else:
+                    note_str = "  --    --.- Hz"
+
+                mute_str = " MUTED" if muted else ""
+
+                line = (
+                    f"\r  FM {args.freq:>7s}"
+                    f"  |  {note_str}"
+                    f"  |  conf {pipeline.conf_th:4.1f}"
+                    f"  |  gate {pipeline.rms_th:.3f}"
+                    f"  |  {note_count:4d} notes"
+                    f"  |  {vf.time_sec:6.1f}s"
+                    f"{mute_str}    "
+                )
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                last_print = now
+
+            time.sleep(0.05)
+
+    finally:
+        keys.stop()
+        shutdown()
         pipeline.stop()
         fm.stop()
         if out_stream:
@@ -462,57 +596,8 @@ def main():
             audio_q.put_nowait(None)
         except queue.Full:
             pass
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
-    # status display loop
-    note_count = 0
-    last_print = 0.0
-
-    print(f"Ghost FM running — synth {'ON' if synth else 'OFF'}")
-    print("Press Ctrl+C to stop\n")
-
-    try:
-        while not shutting_down.is_set():
-            # drain viz queue
-            latest_vf = None
-            while True:
-                try:
-                    vf = viz_q.get_nowait()
-                    note_count += len(vf.notes)
-                    latest_vf = vf
-                except queue.Empty:
-                    break
-
-            # print status ~4x/sec
-            now = time.monotonic()
-            if now - last_print >= 0.25 and latest_vf:
-                vf = latest_vf
-                if vf.current_midi > 0:
-                    note_str = f"{midi_to_name(vf.current_midi):>4s} {vf.current_f0:6.1f} Hz"
-                else:
-                    note_str = "  --    --.- Hz"
-
-                line = (
-                    f"\r  FM {args.freq:>7s}"
-                    f"  |  {note_str}"
-                    f"  |  RMS {vf.rms_level:.4f}"
-                    f"  |  {note_count:4d} notes"
-                    f"  |  {vf.time_sec:6.1f}s"
-                )
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                last_print = now
-
-            time.sleep(0.05)
-
-    except KeyboardInterrupt:
-        shutdown()
-
-    # wait for pipeline thread
-    pipeline_thread.join(timeout=2.0)
-    print("\nDone.")
+        pipeline_thread.join(timeout=2.0)
+        print("\n  Done.\n")
 
 
 if __name__ == "__main__":
