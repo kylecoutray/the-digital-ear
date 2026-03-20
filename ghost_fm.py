@@ -14,6 +14,7 @@ Interactive controls (while running):
   w/s     confidence up/down
   a/d     noise gate up/down
   m       mute/unmute synth
+  r       toggle radio passthrough (hear raw FM audio)
   q       quit
 """
 from __future__ import annotations
@@ -351,9 +352,11 @@ class FMReader:
 
     def __init__(self, freq: str, audio_q: queue.Queue,
                  block_size: int = BLOCK_SIZE, squelch: int = 60,
-                 gain: Optional[int] = None):
+                 gain: Optional[int] = None,
+                 radio_q: Optional[queue.Queue] = None):
         self.freq = freq
         self.audio_q = audio_q
+        self.radio_q = radio_q  # raw FM audio for passthrough playback
         self.block_size = block_size
         self.squelch = squelch
         self.gain = gain
@@ -415,6 +418,13 @@ class FMReader:
                 self.audio_q.put_nowait(samples)
             except queue.Full:
                 pass
+
+            # feed raw audio for radio passthrough
+            if self.radio_q is not None:
+                try:
+                    self.radio_q.put_nowait(samples.copy())
+                except queue.Full:
+                    pass
 
     def stop(self):
         self.running = False
@@ -503,14 +513,35 @@ def main():
     # queues
     audio_q: queue.Queue = queue.Queue(maxsize=64)
     viz_q: queue.Queue = queue.Queue(maxsize=128)
+    radio_q: queue.Queue = queue.Queue(maxsize=64)  # raw FM for passthrough
 
     # synth
     synth = None if args.no_synth else GhostSynth()
     out_stream = None
+    radio_mode = [False]  # list so closure can mutate
+    radio_buf = [np.zeros(1024, dtype=np.float32)]  # playback buffer
 
     if synth:
         def output_callback(outdata, frames, time_info, status):
-            outdata[:, 0] = synth.generate(frames)
+            if radio_mode[0]:
+                # play raw FM audio
+                buf = radio_buf[0]
+                if len(buf) >= frames:
+                    outdata[:, 0] = buf[:frames]
+                    radio_buf[0] = buf[frames:]
+                else:
+                    outdata[:len(buf), 0] = buf
+                    outdata[len(buf):, 0] = 0
+                    radio_buf[0] = np.zeros(0, dtype=np.float32)
+                # refill buffer from queue
+                while True:
+                    try:
+                        chunk = radio_q.get_nowait()
+                        radio_buf[0] = np.concatenate([radio_buf[0], chunk])
+                    except queue.Empty:
+                        break
+            else:
+                outdata[:, 0] = synth.generate(frames)
 
         try:
             out_stream = sd.OutputStream(
@@ -528,7 +559,8 @@ def main():
             sys.exit(1)
 
     # FM reader
-    fm = FMReader(args.freq, audio_q, squelch=args.squelch, gain=args.gain)
+    fm = FMReader(args.freq, audio_q, squelch=args.squelch, gain=args.gain,
+                  radio_q=radio_q)
     fm.start()
 
     # pipeline
@@ -556,7 +588,8 @@ def main():
     print(f"  Tuned to FM {args.freq}  |  synth {'ON' if synth else 'OFF'}")
     print(f"  ──────────────────────────────────────────────")
     print(f"  w/s  confidence ↑↓    a/d  noise gate ↑↓")
-    print(f"  m    mute synth       q    quit")
+    print(f"  r    radio passthrough    m    mute synth")
+    print(f"  q    quit")
     print(f"  ──────────────────────────────────────────────\n")
 
     note_count = 0
@@ -580,6 +613,16 @@ def main():
                     pipeline.rms_th = min(0.1, pipeline.rms_th + 0.002)
                 elif key == 'a':
                     pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
+                elif key == 'r':
+                    radio_mode[0] = not radio_mode[0]
+                    # clear radio buffer on toggle for clean switch
+                    radio_buf[0] = np.zeros(0, dtype=np.float32)
+                    # drain radio queue
+                    while not radio_q.empty():
+                        try:
+                            radio_q.get_nowait()
+                        except queue.Empty:
+                            break
                 elif key == 'm':
                     muted = not muted
                     pipeline.synth_muted = muted
@@ -606,6 +649,7 @@ def main():
                     note_str = "  --    --.- Hz"
 
                 mute_str = " MUTED" if muted else ""
+                mode_str = " [RADIO]" if radio_mode[0] else " [GHOST]"
 
                 line = (
                     f"\r  FM {args.freq:>7s}"
@@ -614,7 +658,7 @@ def main():
                     f"  |  gate {pipeline.rms_th:.3f}"
                     f"  |  {note_count:4d} notes"
                     f"  |  {vf.time_sec:6.1f}s"
-                    f"{mute_str}    "
+                    f"{mode_str}{mute_str}    "
                 )
                 sys.stdout.write(line)
                 sys.stdout.flush()
