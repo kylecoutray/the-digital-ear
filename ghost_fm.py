@@ -112,11 +112,24 @@ class GhostSynth:
         self._attack_coeff = 1.0 - math.exp(-2.0 * math.pi * 12.0 / sr)
         self._release_coeff = 1.0 - math.exp(-2.0 * math.pi * 6.0 / sr)
 
+    @staticmethod
+    def _loudness_boost(freq: float) -> float:
+        """Compensate for human hearing's weak low-freq sensitivity.
+        Boosts below 400 Hz, flat above. Roughly follows equal-loudness."""
+        if freq <= 0:
+            return 1.0
+        if freq < 200:
+            return 1.6
+        elif freq < 400:
+            # linear taper from 1.6 down to 1.0
+            return 1.6 - 0.6 * ((freq - 200) / 200.0)
+        return 1.0
+
     def set_pitch(self, f0_hz: float):
         with self._lock:
             if f0_hz > 20:
                 self._freq = f0_hz
-                self._target_amp = 0.55
+                self._target_amp = 0.55 * self._loudness_boost(f0_hz)
                 self._note_end_sample = self._sample_counter + int(2.0 * self.sr)
             else:
                 self._target_amp = 0.0
@@ -126,7 +139,7 @@ class GhostSynth:
         freq = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
         with self._lock:
             self._freq = freq
-            self._target_amp = 0.55
+            self._target_amp = 0.55 * self._loudness_boost(freq)
             self._note_end_sample = self._sample_counter + int(duration_sec * self.sr)
 
     def stop(self):
