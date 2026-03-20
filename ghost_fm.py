@@ -116,7 +116,7 @@ class GhostSynth:
         with self._lock:
             if f0_hz > 20:
                 self._freq = f0_hz
-                self._target_amp = 0.28
+                self._target_amp = 0.55
                 self._note_end_sample = self._sample_counter + int(2.0 * self.sr)
             else:
                 self._target_amp = 0.0
@@ -126,7 +126,7 @@ class GhostSynth:
         freq = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
         with self._lock:
             self._freq = freq
-            self._target_amp = 0.28
+            self._target_amp = 0.55
             self._note_end_sample = self._sample_counter + int(duration_sec * self.sr)
 
     def stop(self):
@@ -524,8 +524,8 @@ def main():
     if synth:
         def output_callback(outdata, frames, time_info, status):
             if radio_mode[0]:
-                # play raw FM audio
-                buf = radio_buf[0]
+                # play raw FM audio (attenuated to match synth level)
+                buf = radio_buf[0] * 0.4
                 if len(buf) >= frames:
                     outdata[:, 0] = buf[:frames]
                     radio_buf[0] = buf[frames:]
