@@ -524,22 +524,22 @@ def main():
     if synth:
         def output_callback(outdata, frames, time_info, status):
             if radio_mode[0]:
-                # play raw FM audio (attenuated to match synth level)
-                buf = radio_buf[0] * 0.4
-                if len(buf) >= frames:
-                    outdata[:, 0] = buf[:frames]
-                    radio_buf[0] = buf[frames:]
-                else:
-                    outdata[:len(buf), 0] = buf
-                    outdata[len(buf):, 0] = 0
-                    radio_buf[0] = np.zeros(0, dtype=np.float32)
-                # refill buffer from queue
+                # drain queue into buffer first
                 while True:
                     try:
                         chunk = radio_q.get_nowait()
                         radio_buf[0] = np.concatenate([radio_buf[0], chunk])
                     except queue.Empty:
                         break
+                # play from buffer
+                buf = radio_buf[0]
+                if len(buf) >= frames:
+                    outdata[:, 0] = buf[:frames] * 0.5
+                    radio_buf[0] = buf[frames:]
+                else:
+                    outdata[:len(buf), 0] = buf * 0.5
+                    outdata[len(buf):, 0] = 0
+                    radio_buf[0] = np.zeros(0, dtype=np.float32)
             else:
                 outdata[:, 0] = synth.generate(frames)
 
