@@ -583,9 +583,13 @@ def main():
     out_stream = None
     radio_mode = [False]  # list so closure can mutate
     radio_buf = [np.zeros(1024, dtype=np.float32)]  # playback buffer
+    muted_ref = [False]  # list so audio callback can read it
 
     if synth:
         def output_callback(outdata, frames, time_info, status):
+            if muted_ref[0]:
+                outdata[:, 0] = 0
+                return
             if radio_mode[0]:
                 # drain queue into buffer first
                 while True:
@@ -707,6 +711,7 @@ def main():
                             break
                 elif key == 'm':
                     muted = not muted
+                    muted_ref[0] = muted
                     pipeline.synth_muted = muted
                     if synth:
                         synth.muted = muted

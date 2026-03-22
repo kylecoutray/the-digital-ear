@@ -416,8 +416,8 @@ class GhostDisplay:
         gx = int(self._bounce_x)
         gy = int(self._bounce_y)
 
-        # pick the right facing sprite
-        sprite = self._ghost_img if self._bounce_dir_right else self._ghost_img_flipped
+        # pick the right facing sprite (flipped = facing right)
+        sprite = self._ghost_img_flipped if self._bounce_dir_right else self._ghost_img
 
         if sprite:
             ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
@@ -487,16 +487,19 @@ class GhostDisplay:
         else:
             draw.text((8, 98), "--", fill=DIM, font=font_lg)
 
-        # -- mode + muted indicator --
-        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
-        mode_text = self.mode
-        draw.text((170, 86), mode_text, fill=mode_color, font=font_sm)
-
-        # flashing MUTED indicator (slow blink ~1Hz)
+        # -- flashing MUTED indicator (top-right corner) --
         if self.muted:
             blink_on = (int(time.monotonic() * 2) % 2) == 0
             if blink_on:
-                draw.text((162, 102), "MUTED", fill=MUTED_RED, font=font_sm)
+                draw.text((180, 8), "MUTED", fill=MUTED_RED, font=font_sm)
+
+        # -- mode --
+        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
+        mode_text = self.mode
+        if self.muted:
+            mode_text += " MUTED"
+            mode_color = FAINT
+        draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
 
         # -- separator (top/bottom half boundary) --
         draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)
