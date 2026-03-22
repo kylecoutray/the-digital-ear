@@ -469,7 +469,7 @@ class GhostDisplay:
             draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency --
-        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_sm)
+        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_md)
 
         # -- separator --
         draw.line([(8, 68), (232, 68)], fill=FAINT, width=1)
@@ -495,11 +495,9 @@ class GhostDisplay:
 
         # -- mode --
         mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
-        mode_text = self.mode
         if self.muted:
-            mode_text += " MUTED"
             mode_color = FAINT
-        draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
+        draw.text((170, 98), self.mode, fill=mode_color, font=font_sm)
 
         # -- separator (top/bottom half boundary) --
         draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)

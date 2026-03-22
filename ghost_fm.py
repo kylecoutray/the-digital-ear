@@ -476,29 +476,38 @@ class JoystickReader:
       physical DOWN (GPIO 19) -> 'w'  (conf up)
       physical LEFT (GPIO 5)  -> 'd'  (gate up)
       physical RIGHT(GPIO 26) -> 'a'  (gate down)
+
+    Joystick center press: short = mute, hold 1s = reset defaults.
     """
 
     # GPIO pin -> key mapping (flipped for upside-down mount)
+    # GPIO 13 (joystick press) handled separately for hold detection
     PIN_MAP = {
         6:  's',   # physical UP    -> conf down
         19: 'w',   # physical DOWN  -> conf up
         5:  'd',   # physical LEFT  -> gate up
         26: 'a',   # physical RIGHT -> gate down
-        13: 'r',   # joystick press -> radio toggle
-        16: 'm',   # KEY3 (top when upside-down)    -> mute
+        16: 'r',   # KEY3 (top when upside-down)    -> radio toggle
         20: 'f',   # KEY2 (middle)                  -> cycle FM preset
         21: 'p',   # KEY1 (bottom when upside-down) -> pause/unpause
     }
+
+    HOLD_PIN = 13          # joystick center press
+    HOLD_THRESHOLD = 1.0   # seconds to trigger hold vs tap
 
     def __init__(self):
         self._buttons = {}
         self._prev_state = {}
         self._available = False
+        self._hold_press_time: float = 0.0   # when center was pressed
+        self._hold_was_pressed: bool = False
+        self._hold_fired: bool = False        # already fired hold action
 
     def start(self):
         try:
             from gpiozero import Button as GpioButton
-            for pin in self.PIN_MAP:
+            all_pins = list(self.PIN_MAP.keys()) + [self.HOLD_PIN]
+            for pin in all_pins:
                 btn = GpioButton(pin, pull_up=True, bounce_time=0.05)
                 self._buttons[pin] = btn
                 self._prev_state[pin] = False
@@ -508,16 +517,45 @@ class JoystickReader:
             self._available = False
 
     def get_key(self) -> Optional[str]:
-        """Return mapped key on new press (edge-triggered), else None."""
+        """Return mapped key on new press (edge-triggered), else None.
+
+        Joystick center: returns 'm' on short press release,
+        'x' (reset) if held >= 1 second.
+        """
         if not self._available:
             return None
+
+        # check regular buttons first
         for pin, btn in self._buttons.items():
+            if pin == self.HOLD_PIN:
+                continue
             pressed = btn.is_pressed
             if pressed and not self._prev_state[pin]:
                 self._prev_state[pin] = True
                 return self.PIN_MAP[pin]
             elif not pressed:
                 self._prev_state[pin] = False
+
+        # handle joystick center (hold detection)
+        if self.HOLD_PIN in self._buttons:
+            pressed = self._buttons[self.HOLD_PIN].is_pressed
+            if pressed and not self._hold_was_pressed:
+                # just pressed
+                self._hold_was_pressed = True
+                self._hold_press_time = time.monotonic()
+                self._hold_fired = False
+            elif pressed and self._hold_was_pressed and not self._hold_fired:
+                # still holding — check if threshold reached
+                if time.monotonic() - self._hold_press_time >= self.HOLD_THRESHOLD:
+                    self._hold_fired = True
+                    return 'x'  # reset defaults
+            elif not pressed and self._hold_was_pressed:
+                # just released
+                self._hold_was_pressed = False
+                if not self._hold_fired:
+                    return 'm'  # short press = mute
+                self._hold_fired = False
+
         return None
 
     def stop(self):
@@ -739,6 +777,11 @@ def main():
                     else:
                         fm.freq = new_freq
                     print(f"\r  ** FM -> {new_freq} **                                  ")
+                elif key == 'x':
+                    # reset conf and gate to defaults (joystick hold)
+                    pipeline.conf_th = args.conf
+                    pipeline.rms_th = args.rms
+                    print(f"\r  ** RESET — conf {args.conf:.1f}  gate {args.rms:.3f} **       ")
 
             # drain viz queue
             latest_vf = None
