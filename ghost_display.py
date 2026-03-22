@@ -30,12 +30,12 @@ except ImportError:
 WIDTH = 240
 HEIGHT = 240
 
-# color scheme (purple on black, tuned for RGB565 display)
+# color scheme (cyan on black, optimized for RGB565 display)
 BLACK = (0, 0, 0)
-PURPLE = (255, 0, 255)         # full magenta — reads as vivid purple on RGB565
-BRIGHT = (200, 80, 255)        # accent purple for values
-DIM_PURPLE = (120, 40, 180)    # dim purple for labels and secondary text
-FAINT_PURPLE = (70, 20, 110)   # very dim for separators
+CYAN = (0, 255, 255)           # vivid cyan — pops on RGB565
+BRIGHT = (0, 200, 220)         # accent cyan for values
+DIM = (0, 90, 110)             # dim cyan for labels and secondary text
+FAINT = (0, 40, 55)            # very dim for separators
 WHITE = (220, 220, 220)
 
 # ST7789 GPIO pins (Waveshare 1.3" LCD HAT)
@@ -213,17 +213,19 @@ class GhostDisplay:
             self._hw = None
             return
 
-        # load ghost sprite
+        # load ghost sprite (tinted purple -> cyan)
         try:
             raw = Image.open(self._ghost_path).convert("RGBA")
+            raw = self._tint_to_cyan(raw)
             self._ghost_img = raw.resize((48, 48), Image.NEAREST)
         except Exception as e:
             print(f"  LCD: Ghost sprite not found ({e}), using fallback")
             self._ghost_img = self._make_fallback_ghost()
 
-        # load logo (374x127 -> fit in ~168x28 px, next to ghost)
+        # load logo (tinted purple -> cyan, 374x127 -> fit next to ghost)
         try:
             logo_raw = Image.open(self._logo_path).convert("RGBA")
+            logo_raw = self._tint_to_cyan(logo_raw)
             # scale to ~28px tall, preserve aspect ratio
             logo_h = 28
             logo_w = int(logo_raw.width * logo_h / logo_raw.height)
@@ -302,47 +304,62 @@ class GhostDisplay:
             img.paste(logo_layer.crop((logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)),
                       (logo_x, logo_y), logo_mask)
         else:
-            draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
+            draw.text((64, 14), "GhostFM", fill=CYAN, font=font_lg)
 
         # -- FM frequency --
-        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM_PURPLE, font=font_sm)
+        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_sm)
 
         # -- separator line --
-        draw.line([(8, 68), (232, 68)], fill=FAINT_PURPLE, width=1)
+        draw.line([(8, 68), (232, 68)], fill=FAINT, width=1)
 
         # -- conf / gate values --
-        draw.text((8, 76), "conf", fill=DIM_PURPLE, font=font_sm)
+        draw.text((8, 76), "conf", fill=DIM, font=font_sm)
         draw.text((50, 74), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
 
-        draw.text((120, 76), "gate", fill=DIM_PURPLE, font=font_sm)
+        draw.text((120, 76), "gate", fill=DIM, font=font_sm)
         draw.text((162, 74), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note --
         if self.note_name != "--":
-            draw.text((8, 98), self.note_name, fill=PURPLE, font=font_lg)
-            draw.text((60, 100), f"{self.freq_hz:.1f} Hz", fill=DIM_PURPLE, font=font_sm)
+            draw.text((8, 98), self.note_name, fill=CYAN, font=font_lg)
+            draw.text((60, 100), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
         else:
-            draw.text((8, 98), "--", fill=DIM_PURPLE, font=font_lg)
+            draw.text((8, 98), "--", fill=DIM, font=font_lg)
 
         # -- mode / mute indicator --
-        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
+        mode_color = BRIGHT if self.mode == "GHOST" else CYAN
         mode_text = self.mode
         if self.muted:
             mode_text += " MUTED"
-            mode_color = FAINT_PURPLE
+            mode_color = FAINT
         draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
 
         # -- bottom separator (top-half boundary) --
-        draw.line([(8, 120), (232, 120)], fill=FAINT_PURPLE, width=1)
+        draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)
 
         return img
+
+    @staticmethod
+    def _tint_to_cyan(img: Image.Image) -> Image.Image:
+        """Shift purple/magenta hues to cyan in an RGBA image.
+
+        Swaps R and B channels with G channel to turn purple into cyan,
+        while preserving alpha and brightness.
+        """
+        r, g, b, a = img.split()
+        # purple = high R + high B, low G
+        # cyan   = low R, high G + high B
+        from PIL import ImageChops
+        bright = ImageChops.lighter(r, b)
+        zero = Image.new("L", img.size, 0)
+        return Image.merge("RGBA", (zero, bright, bright, a))
 
     @staticmethod
     def _make_fallback_ghost() -> Image.Image:
         """Draw a simple pixel-art ghost if no sprite file is found."""
         img = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        ghost_color = (179, 136, 255, 255)
+        ghost_color = (0, 255, 255, 255)
 
         # simple ghost body (rounded top, wavy bottom)
         # head
@@ -357,9 +374,9 @@ class GhostDisplay:
         draw.rectangle([18, 14, 22, 20], fill=BLACK)
         draw.rectangle([26, 14, 30, 20], fill=BLACK)
         # headphone band
-        draw.arc([10, 2, 38, 22], 180, 0, fill=(118, 255, 3, 255), width=2)
+        draw.arc([10, 2, 38, 22], 180, 0, fill=(0, 200, 220, 255), width=2)
         # ear cups
-        draw.rectangle([8, 12, 14, 22], fill=(118, 255, 3, 255))
-        draw.rectangle([34, 12, 40, 22], fill=(118, 255, 3, 255))
+        draw.rectangle([8, 12, 14, 22], fill=(0, 200, 220, 255))
+        draw.rectangle([34, 12, 40, 22], fill=(0, 200, 220, 255))
 
         return img
