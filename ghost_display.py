@@ -85,12 +85,34 @@ def _aura_color(t: float) -> tuple:
     return _lerp_color(AURA[idx], AURA[idx + 1], frac)
 
 
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple:
+    """Convert HSV (0..1) to RGB (0..255)."""
+    if s == 0.0:
+        c = int(v * 255)
+        return (c, c, c)
+    h6 = h * 6.0
+    i = int(h6)
+    f = h6 - i
+    p = int(v * (1.0 - s) * 255)
+    q = int(v * (1.0 - s * f) * 255)
+    t = int(v * (1.0 - s * (1.0 - f)) * 255)
+    v = int(v * 255)
+    i = i % 6
+    if i == 0: return (v, t, p)
+    if i == 1: return (q, v, p)
+    if i == 2: return (p, v, t)
+    if i == 3: return (p, q, v)
+    if i == 4: return (t, p, v)
+    return (v, p, q)
+
+
 @dataclass
 class RollNote:
     """A note event for the piano roll display."""
     midi: int
     start_time: float
     end_time: float  # 0 = still playing
+    color: tuple = (255, 255, 255)  # RGB color at time of creation
 
 
 class ST7789Direct:
@@ -230,16 +252,23 @@ class GhostDisplay:
         self._ghost_path = ghost_sprite_path
         self._logo_path = os.path.join(base, "assets", "ghostfm_purple.png")
 
-        # pre-compute per-MIDI-note colors from AURA gradient
-        self._note_colors = []
-        for i in range(NUM_KEYS):
-            t = i / max(NUM_KEYS - 1, 1)
-            self._note_colors.append(_aura_color(t))
+        # rainbow hue cycling — one full cycle every ~10 seconds
+        self._hue_cycle_rate = 0.1   # hue units per second (full cycle = 1.0)
+        self._start_time = time.monotonic()
+        self._current_color = (255, 255, 255)  # current note bar color
+        self._live_color = (255, 255, 255)      # color of the live note
+
+    def _get_hue_color(self) -> tuple:
+        """Get the current rainbow color based on elapsed time."""
+        elapsed = time.monotonic() - self._start_time
+        hue = (elapsed * self._hue_cycle_rate) % 1.0
+        return _hsv_to_rgb(hue, 0.9, 1.0)
 
     def push_note(self, midi: int):
         """Called by main thread when the current note changes."""
         now = time.monotonic()
         self._roll_time = now
+        self._current_color = self._get_hue_color()
 
         if midi == self._live_midi:
             return  # same note, keep extending
@@ -250,11 +279,13 @@ class GhostDisplay:
                 midi=self._live_midi,
                 start_time=self._live_start,
                 end_time=now,
+                color=self._live_color,
             ))
 
-        # start new live note
+        # start new live note with current hue color
         self._live_midi = midi
         self._live_start = now if midi > 0 else 0.0
+        self._live_color = self._current_color
 
     def start(self):
         if not _HAS_PIL:
@@ -365,9 +396,9 @@ class GhostDisplay:
         draw.text((120, 76), "gate", fill=DIM, font=font_sm)
         draw.text((162, 74), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
-        # -- current note --
+        # -- current note (color matches current rainbow hue) --
         if self.note_name != "--":
-            draw.text((8, 98), self.note_name, fill=PURPLE, font=font_lg)
+            draw.text((8, 98), self.note_name, fill=self._current_color, font=font_lg)
             draw.text((60, 100), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
         else:
             draw.text((8, 98), "--", fill=DIM, font=font_lg)
@@ -401,7 +432,7 @@ class GhostDisplay:
                 y = ROLL_TOP + int(i * key_h)
                 draw.line([(0, y), (WIDTH, y)], fill=(25, 15, 35), width=1)
 
-        # draw completed notes
+        # draw completed notes (each has its own stamped color)
         for note in self._roll_notes:
             if note.midi < MIDI_LO or note.midi >= MIDI_HI:
                 continue
@@ -416,8 +447,7 @@ class GhostDisplay:
             y = ROLL_TOP + int(row * key_h) + 1
             h = max(int(key_h) - 2, 1)
 
-            color_idx = note.midi - MIDI_LO
-            color = self._note_colors[color_idx]
+            color = note.color
 
             # fade with age
             age = now - note.end_time
@@ -427,7 +457,7 @@ class GhostDisplay:
 
             draw.rectangle([x_start, y, x_end, y + h], fill=color)
 
-        # draw live note (extends to right edge)
+        # draw live note (extends to right edge, uses current live color)
         if self._live_midi > 0 and MIDI_LO <= self._live_midi < MIDI_HI:
             x_start = int(WIDTH - (now - self._live_start) * px_per_sec)
             x_start = max(0, x_start)
@@ -436,10 +466,7 @@ class GhostDisplay:
             y = ROLL_TOP + int(row * key_h) + 1
             h = max(int(key_h) - 2, 1)
 
-            color_idx = self._live_midi - MIDI_LO
-            color = self._note_colors[color_idx]
-
-            draw.rectangle([x_start, y, WIDTH, y + h], fill=color)
+            draw.rectangle([x_start, y, WIDTH, y + h], fill=self._live_color)
 
         # prune old notes
         cutoff = now - ROLL_SECONDS * 2

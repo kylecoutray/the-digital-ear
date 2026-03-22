@@ -484,6 +484,7 @@ class JoystickReader:
         19: 'w',   # physical DOWN  -> conf up
         5:  'd',   # physical LEFT  -> gate up
         26: 'a',   # physical RIGHT -> gate down
+        13: 'r',   # joystick press -> radio toggle
     }
 
     def __init__(self):
