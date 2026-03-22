@@ -45,13 +45,16 @@ PIN_BL = 24
 class ST7789Direct:
     """Minimal ST7789 driver using spidev + lgpio (Pi 5 compatible)."""
 
-    def __init__(self, width=240, height=240, rotation=180,
+    def __init__(self, width=240, height=240, rotation=90,
                  spi_speed_hz=40_000_000):
         self.width = width
         self.height = height
         self.rotation = rotation
         self._spi = None
         self._gpio = None
+        # ST7789 has 240x320 framebuffer; 240x240 display needs offset
+        self._col_offset = 0
+        self._row_offset = 0
 
     def begin(self):
         import spidev
@@ -86,15 +89,19 @@ class ST7789Direct:
         self._cmd(0x11)   # sleep out
         time.sleep(0.15)
         self._cmd(0x3A); self._data(0x05)   # 16-bit color RGB565
-        # MADCTL for rotation
+        # MADCTL for rotation + framebuffer offsets (240x320 -> 240x240)
         if self.rotation == 180:
             self._cmd(0x36); self._data(0xC0)
+            self._col_offset = 0; self._row_offset = 80
         elif self.rotation == 90:
             self._cmd(0x36); self._data(0xA0)
+            self._col_offset = 80; self._row_offset = 0
         elif self.rotation == 270:
             self._cmd(0x36); self._data(0x60)
+            self._col_offset = 0; self._row_offset = 0
         else:
             self._cmd(0x36); self._data(0x00)
+            self._col_offset = 0; self._row_offset = 0
         self._cmd(0x21)   # inversion on
         self._cmd(0x29)   # display on
         time.sleep(0.05)
@@ -106,11 +113,15 @@ class ST7789Direct:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # set window
+        # set window (with framebuffer offsets)
+        x0 = self._col_offset
+        x1 = self._col_offset + self.width - 1
+        y0 = self._row_offset
+        y1 = self._row_offset + self.height - 1
         self._cmd(0x2A)
-        self._data([0x00, 0x00, 0x00, self.width - 1])
+        self._data([(x0 >> 8) & 0xFF, x0 & 0xFF, (x1 >> 8) & 0xFF, x1 & 0xFF])
         self._cmd(0x2B)
-        self._data([0x00, 0x00, 0x00, self.height - 1])
+        self._data([(y0 >> 8) & 0xFF, y0 & 0xFF, (y1 >> 8) & 0xFF, y1 & 0xFF])
         self._cmd(0x2C)
 
         # convert to RGB565
@@ -193,7 +204,7 @@ class GhostDisplay:
 
         # try to init ST7789 via direct SPI
         try:
-            self._hw = ST7789Direct(rotation=180)
+            self._hw = ST7789Direct(rotation=90)
             self._hw.begin()
         except Exception as e:
             print(f"  LCD: ST7789 not available ({e}), display disabled")
