@@ -188,13 +188,15 @@ class GhostDisplay:
         self._thread: Optional[threading.Thread] = None
         self._hw: Optional[ST7789Direct] = None
         self._ghost_img: Optional[Image.Image] = None
+        self._logo_img: Optional[Image.Image] = None
         self._frame_count = 0
 
-        # resolve ghost sprite path
+        # resolve asset paths
+        base = os.path.dirname(os.path.abspath(__file__))
         if ghost_sprite_path is None:
-            base = os.path.dirname(os.path.abspath(__file__))
             ghost_sprite_path = os.path.join(base, "assets", "ghost.png")
         self._ghost_path = ghost_sprite_path
+        self._logo_path = os.path.join(base, "assets", "ghostfm_purple.png")
 
     def start(self):
         """Initialize display hardware and start render thread."""
@@ -218,6 +220,17 @@ class GhostDisplay:
         except Exception as e:
             print(f"  LCD: Ghost sprite not found ({e}), using fallback")
             self._ghost_img = self._make_fallback_ghost()
+
+        # load logo (374x127 -> fit in ~168x28 px, next to ghost)
+        try:
+            logo_raw = Image.open(self._logo_path).convert("RGBA")
+            # scale to ~28px tall, preserve aspect ratio
+            logo_h = 28
+            logo_w = int(logo_raw.width * logo_h / logo_raw.height)
+            self._logo_img = logo_raw.resize((logo_w, logo_h), Image.LANCZOS)
+        except Exception as e:
+            print(f"  LCD: Logo not found ({e}), using text fallback")
+            self._logo_img = None
 
         self._running = True
         self._thread = threading.Thread(target=self._render_loop, daemon=True)
@@ -270,13 +283,29 @@ class GhostDisplay:
         ghost_y = 10 + bob_offset
 
         if self._ghost_img:
-            img.paste(self._ghost_img, (ghost_x, ghost_y), self._ghost_img)
+            # composite onto a black background to preserve full color
+            ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            ghost_layer.paste(self._ghost_img, (ghost_x, ghost_y), self._ghost_img)
+            # merge only the ghost area
+            mask = self._ghost_img.split()[3]  # alpha channel
+            img.paste(ghost_layer.crop((ghost_x, ghost_y, ghost_x + 48, ghost_y + 48)),
+                      (ghost_x, ghost_y), mask)
 
-        # -- title --
-        draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
+        # -- title (logo or text fallback) --
+        if self._logo_img:
+            logo_x = 64
+            logo_y = 12
+            logo_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            logo_layer.paste(self._logo_img, (logo_x, logo_y), self._logo_img)
+            logo_w, logo_h = self._logo_img.size
+            logo_mask = self._logo_img.split()[3]
+            img.paste(logo_layer.crop((logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)),
+                      (logo_x, logo_y), logo_mask)
+        else:
+            draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency --
-        draw.text((64, 38), f"FM {self.fm_freq}", fill=DIM_PURPLE, font=font_sm)
+        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM_PURPLE, font=font_sm)
 
         # -- separator line --
         draw.line([(8, 68), (232, 68)], fill=DIM_PURPLE, width=1)
