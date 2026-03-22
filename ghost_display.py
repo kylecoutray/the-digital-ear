@@ -5,7 +5,10 @@ GhostFM LCD Display — Waveshare 1.3" LCD HAT (240x240, ST7789)
 Retro-themed status display for GhostFM.
 Runs in a daemon thread, reads pipeline state, draws to LCD at ~10 fps.
 
-Mounted upside-down: MADCTL rotation = 0xC0 (180 degrees).
+Top half: ghost sprite, logo, conf/gate, current note.
+Bottom half: scrolling piano roll with Paradromics gradient colors.
+
+Mounted upside-down: MADCTL rotation = 90 degrees.
 Uses direct SPI via spidev + lgpio (Pi 5 compatible).
 Graceful fallback: if SPI/lgpio unavailable, prints warning and no-ops.
 """
@@ -15,6 +18,8 @@ import math
 import os
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -30,18 +35,62 @@ except ImportError:
 WIDTH = 240
 HEIGHT = 240
 
-# color scheme (cyan on black, optimized for RGB565 display)
+# piano roll region (bottom half)
+ROLL_TOP = 124       # just below the separator at y=120
+ROLL_HEIGHT = HEIGHT - ROLL_TOP
+MIDI_LO = 48         # C3
+MIDI_HI = 84         # C6
+NUM_KEYS = MIDI_HI - MIDI_LO
+ROLL_SECONDS = 6.0   # seconds of history visible
+
+# color scheme (purple on black, tuned for RGB565 display)
 BLACK = (0, 0, 0)
-CYAN = (0, 255, 255)           # vivid cyan — pops on RGB565
-BRIGHT = (0, 200, 220)         # accent cyan for values
-DIM = (0, 90, 110)             # dim cyan for labels and secondary text
-FAINT = (0, 40, 55)            # very dim for separators
+PURPLE = (255, 0, 255)         # full magenta
+BRIGHT = (200, 80, 255)        # accent purple for values
+DIM = (120, 40, 180)           # dim purple for labels
+FAINT = (70, 20, 110)          # very dim for separators
 WHITE = (220, 220, 220)
+
+# Paradromics aura gradient (orange -> blue -> purple -> red)
+AURA = [
+    (240, 140, 30), (210, 100, 20), (80, 50, 160),
+    (30, 70, 210), (50, 100, 240), (70, 80, 220),
+    (140, 50, 180), (210, 55, 65), (180, 40, 35),
+]
 
 # ST7789 GPIO pins (Waveshare 1.3" LCD HAT)
 PIN_DC = 25
 PIN_RST = 27
 PIN_BL = 24
+
+
+def _lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
+    """Linearly interpolate between two RGB tuples."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
+def _aura_color(t: float) -> tuple:
+    """Get a color from the AURA gradient at position t (0..1)."""
+    t = t % 1.0
+    n = len(AURA) - 1
+    idx = int(t * n)
+    frac = (t * n) - idx
+    if idx >= n:
+        idx = n - 1
+        frac = 1.0
+    return _lerp_color(AURA[idx], AURA[idx + 1], frac)
+
+
+@dataclass
+class RollNote:
+    """A note event for the piano roll display."""
+    midi: int
+    start_time: float
+    end_time: float  # 0 = still playing
 
 
 class ST7789Direct:
@@ -54,7 +103,6 @@ class ST7789Direct:
         self.rotation = rotation
         self._spi = None
         self._gpio = None
-        # ST7789 has 240x320 framebuffer; 240x240 display needs offset
         self._col_offset = 0
         self._row_offset = 0
 
@@ -62,17 +110,14 @@ class ST7789Direct:
         import spidev
         import lgpio
 
-        # GPIO
         self._lgpio = lgpio
-        self._gpio = lgpio.gpiochip_open(4)  # Pi 5 = chip 4
+        self._gpio = lgpio.gpiochip_open(4)
         lgpio.gpio_claim_output(self._gpio, PIN_DC)
         lgpio.gpio_claim_output(self._gpio, PIN_RST)
         lgpio.gpio_claim_output(self._gpio, PIN_BL)
 
-        # backlight on
         lgpio.gpio_write(self._gpio, PIN_BL, 1)
 
-        # hardware reset
         lgpio.gpio_write(self._gpio, PIN_RST, 1)
         time.sleep(0.1)
         lgpio.gpio_write(self._gpio, PIN_RST, 0)
@@ -80,18 +125,15 @@ class ST7789Direct:
         lgpio.gpio_write(self._gpio, PIN_RST, 1)
         time.sleep(0.1)
 
-        # SPI
         self._spi = spidev.SpiDev(0, 0)
         self._spi.max_speed_hz = 40_000_000
         self._spi.mode = 0
 
-        # init sequence
-        self._cmd(0x01)   # software reset
+        self._cmd(0x01)
         time.sleep(0.15)
-        self._cmd(0x11)   # sleep out
+        self._cmd(0x11)
         time.sleep(0.15)
-        self._cmd(0x3A); self._data(0x05)   # 16-bit color RGB565
-        # MADCTL for rotation + framebuffer offsets (240x320 -> 240x240)
+        self._cmd(0x3A); self._data(0x05)
         if self.rotation == 180:
             self._cmd(0x36); self._data(0xC0)
             self._col_offset = 0; self._row_offset = 80
@@ -104,18 +146,16 @@ class ST7789Direct:
         else:
             self._cmd(0x36); self._data(0x00)
             self._col_offset = 0; self._row_offset = 0
-        self._cmd(0x21)   # inversion on (required for this panel)
-        self._cmd(0x29)   # display on
+        self._cmd(0x21)
+        self._cmd(0x29)
         time.sleep(0.05)
 
     def display(self, img: Image.Image):
-        """Push a PIL RGB image to the display."""
         if img.size != (self.width, self.height):
             img = img.resize((self.width, self.height))
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # set window (with framebuffer offsets)
         x0 = self._col_offset
         x1 = self._col_offset + self.width - 1
         y0 = self._row_offset
@@ -126,16 +166,13 @@ class ST7789Direct:
         self._data([(y0 >> 8) & 0xFF, y0 & 0xFF, (y1 >> 8) & 0xFF, y1 & 0xFF])
         self._cmd(0x2C)
 
-        # convert to RGB565 (numpy vectorized — fast + accurate)
         arr = np.frombuffer(img.tobytes(), dtype=np.uint8).reshape(-1, 3).astype(np.uint16)
         rgb565 = ((arr[:, 0] & 0xF8) << 8) | ((arr[:, 1] & 0xFC) << 3) | (arr[:, 2] >> 3)
-        # big-endian byte order for SPI
         buf = np.empty(len(rgb565) * 2, dtype=np.uint8)
         buf[0::2] = (rgb565 >> 8).astype(np.uint8)
         buf[1::2] = (rgb565 & 0xFF).astype(np.uint8)
         raw = buf.tobytes()
 
-        # send in chunks (spidev limit)
         self._lgpio.gpio_write(self._gpio, PIN_DC, 1)
         for i in range(0, len(raw), 4096):
             self._spi.writebytes(raw[i:i+4096])
@@ -159,19 +196,7 @@ class ST7789Direct:
 
 
 class GhostDisplay:
-    """Drives the Waveshare 1.3" LCD HAT with a retro GhostFM status UI.
-
-    Usage:
-        display = GhostDisplay()
-        display.start()
-        # update state as needed:
-        display.conf_th = 5.0
-        display.rms_th = 0.003
-        display.note_name = "A4"
-        display.freq_hz = 440.0
-        # ...
-        display.stop()
-    """
+    """Drives the Waveshare 1.3" LCD HAT with a retro GhostFM status UI."""
 
     def __init__(self, ghost_sprite_path: Optional[str] = None):
         # shared state (written by main thread, read by display thread)
@@ -183,6 +208,7 @@ class GhostDisplay:
         self.fm_freq: str = "89.9M"
         self.mode: str = "GHOST"
         self.muted: bool = False
+        self.current_midi: int = 0  # live MIDI note number (0 = none)
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -191,6 +217,12 @@ class GhostDisplay:
         self._logo_img: Optional[Image.Image] = None
         self._frame_count = 0
 
+        # piano roll note history
+        self._roll_notes: deque[RollNote] = deque(maxlen=200)
+        self._live_midi: int = 0
+        self._live_start: float = 0.0
+        self._roll_time: float = 0.0
+
         # resolve asset paths
         base = os.path.dirname(os.path.abspath(__file__))
         if ghost_sprite_path is None:
@@ -198,13 +230,37 @@ class GhostDisplay:
         self._ghost_path = ghost_sprite_path
         self._logo_path = os.path.join(base, "assets", "ghostfm_purple.png")
 
+        # pre-compute per-MIDI-note colors from AURA gradient
+        self._note_colors = []
+        for i in range(NUM_KEYS):
+            t = i / max(NUM_KEYS - 1, 1)
+            self._note_colors.append(_aura_color(t))
+
+    def push_note(self, midi: int):
+        """Called by main thread when the current note changes."""
+        now = time.monotonic()
+        self._roll_time = now
+
+        if midi == self._live_midi:
+            return  # same note, keep extending
+
+        # close previous live note
+        if self._live_midi > 0:
+            self._roll_notes.append(RollNote(
+                midi=self._live_midi,
+                start_time=self._live_start,
+                end_time=now,
+            ))
+
+        # start new live note
+        self._live_midi = midi
+        self._live_start = now if midi > 0 else 0.0
+
     def start(self):
-        """Initialize display hardware and start render thread."""
         if not _HAS_PIL:
             print("  LCD: Pillow not available, display disabled")
             return
 
-        # try to init ST7789 via direct SPI
         try:
             self._hw = ST7789Direct(rotation=90)
             self._hw.begin()
@@ -213,20 +269,17 @@ class GhostDisplay:
             self._hw = None
             return
 
-        # load ghost sprite (tinted purple -> cyan)
+        # load ghost sprite
         try:
             raw = Image.open(self._ghost_path).convert("RGBA")
-            raw = self._tint_to_cyan(raw)
             self._ghost_img = raw.resize((48, 48), Image.NEAREST)
         except Exception as e:
             print(f"  LCD: Ghost sprite not found ({e}), using fallback")
             self._ghost_img = self._make_fallback_ghost()
 
-        # load logo (tinted purple -> cyan, 374x127 -> fit next to ghost)
+        # load logo
         try:
             logo_raw = Image.open(self._logo_path).convert("RGBA")
-            logo_raw = self._tint_to_cyan(logo_raw)
-            # scale to ~28px tall, preserve aspect ratio
             logo_h = 28
             logo_w = int(logo_raw.width * logo_h / logo_raw.height)
             self._logo_img = logo_raw.resize((logo_w, logo_h), Image.LANCZOS)
@@ -240,7 +293,6 @@ class GhostDisplay:
         print("  LCD: Display started")
 
     def stop(self):
-        """Stop render thread and blank display."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -253,7 +305,6 @@ class GhostDisplay:
                 pass
 
     def _render_loop(self):
-        """Main render loop, ~10 fps."""
         while self._running:
             try:
                 frame = self._draw_frame()
@@ -262,14 +313,12 @@ class GhostDisplay:
                 self._frame_count += 1
             except Exception:
                 pass
-            time.sleep(0.1)  # ~10 fps
+            time.sleep(0.1)
 
     def _draw_frame(self) -> Image.Image:
-        """Draw one frame of the status UI."""
         img = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
         draw = ImageDraw.Draw(img)
 
-        # load font (PIL default bitmap font)
         try:
             font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
             font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 16)
@@ -285,11 +334,9 @@ class GhostDisplay:
         ghost_y = 10 + bob_offset
 
         if self._ghost_img:
-            # composite onto a black background to preserve full color
             ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
             ghost_layer.paste(self._ghost_img, (ghost_x, ghost_y), self._ghost_img)
-            # merge only the ghost area
-            mask = self._ghost_img.split()[3]  # alpha channel
+            mask = self._ghost_img.split()[3]
             img.paste(ghost_layer.crop((ghost_x, ghost_y, ghost_x + 48, ghost_y + 48)),
                       (ghost_x, ghost_y), mask)
 
@@ -304,79 +351,116 @@ class GhostDisplay:
             img.paste(logo_layer.crop((logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)),
                       (logo_x, logo_y), logo_mask)
         else:
-            draw.text((64, 14), "GhostFM", fill=CYAN, font=font_lg)
+            draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency --
         draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_sm)
 
-        # -- separator line --
+        # -- separator --
         draw.line([(8, 68), (232, 68)], fill=FAINT, width=1)
 
-        # -- conf / gate values --
+        # -- conf / gate --
         draw.text((8, 76), "conf", fill=DIM, font=font_sm)
         draw.text((50, 74), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
-
         draw.text((120, 76), "gate", fill=DIM, font=font_sm)
         draw.text((162, 74), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note --
         if self.note_name != "--":
-            draw.text((8, 98), self.note_name, fill=CYAN, font=font_lg)
+            draw.text((8, 98), self.note_name, fill=PURPLE, font=font_lg)
             draw.text((60, 100), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
         else:
             draw.text((8, 98), "--", fill=DIM, font=font_lg)
 
-        # -- mode / mute indicator --
-        mode_color = BRIGHT if self.mode == "GHOST" else CYAN
+        # -- mode --
+        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
         mode_text = self.mode
         if self.muted:
             mode_text += " MUTED"
             mode_color = FAINT
         draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
 
-        # -- bottom separator (top-half boundary) --
+        # -- separator (top/bottom half boundary) --
         draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)
+
+        # -- piano roll (bottom half) --
+        self._draw_roll(draw, img)
 
         return img
 
-    @staticmethod
-    def _tint_to_cyan(img: Image.Image) -> Image.Image:
-        """Shift purple/magenta hues to cyan in an RGBA image.
+    def _draw_roll(self, draw: ImageDraw.Draw, img: Image.Image):
+        """Draw the scrolling piano roll in the bottom half."""
+        now = time.monotonic()
+        key_h = ROLL_HEIGHT / NUM_KEYS
+        px_per_sec = WIDTH / ROLL_SECONDS
 
-        Swaps R and B channels with G channel to turn purple into cyan,
-        while preserving alpha and brightness.
-        """
-        r, g, b, a = img.split()
-        # purple = high R + high B, low G
-        # cyan   = low R, high G + high B
-        from PIL import ImageChops
-        bright = ImageChops.lighter(r, b)
-        zero = Image.new("L", img.size, 0)
-        return Image.merge("RGBA", (zero, bright, bright, a))
+        # dim octave grid lines
+        for i in range(NUM_KEYS):
+            midi = MIDI_HI - 1 - i
+            if midi % 12 == 0:
+                y = ROLL_TOP + int(i * key_h)
+                draw.line([(0, y), (WIDTH, y)], fill=(25, 15, 35), width=1)
+
+        # draw completed notes
+        for note in self._roll_notes:
+            if note.midi < MIDI_LO or note.midi >= MIDI_HI:
+                continue
+
+            x_start = int(WIDTH - (now - note.start_time) * px_per_sec)
+            x_end = int(WIDTH - (now - note.end_time) * px_per_sec)
+
+            if x_end < 0 or x_start > WIDTH:
+                continue
+
+            row = MIDI_HI - 1 - note.midi
+            y = ROLL_TOP + int(row * key_h) + 1
+            h = max(int(key_h) - 2, 1)
+
+            color_idx = note.midi - MIDI_LO
+            color = self._note_colors[color_idx]
+
+            # fade with age
+            age = now - note.end_time
+            if age > 2.0:
+                t = min((age - 2.0) / 3.0, 0.85)
+                color = _lerp_color(color, (15, 10, 20), t)
+
+            draw.rectangle([x_start, y, x_end, y + h], fill=color)
+
+        # draw live note (extends to right edge)
+        if self._live_midi > 0 and MIDI_LO <= self._live_midi < MIDI_HI:
+            x_start = int(WIDTH - (now - self._live_start) * px_per_sec)
+            x_start = max(0, x_start)
+
+            row = MIDI_HI - 1 - self._live_midi
+            y = ROLL_TOP + int(row * key_h) + 1
+            h = max(int(key_h) - 2, 1)
+
+            color_idx = self._live_midi - MIDI_LO
+            color = self._note_colors[color_idx]
+
+            draw.rectangle([x_start, y, WIDTH, y + h], fill=color)
+
+        # prune old notes
+        cutoff = now - ROLL_SECONDS * 2
+        while self._roll_notes and self._roll_notes[0].end_time < cutoff:
+            self._roll_notes.popleft()
 
     @staticmethod
     def _make_fallback_ghost() -> Image.Image:
-        """Draw a simple pixel-art ghost if no sprite file is found."""
         img = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        ghost_color = (0, 255, 255, 255)
+        ghost_color = (255, 0, 255, 255)
 
-        # simple ghost body (rounded top, wavy bottom)
-        # head
         draw.ellipse([12, 4, 36, 28], fill=ghost_color)
-        # body
         draw.rectangle([12, 16, 36, 38], fill=ghost_color)
-        # wavy bottom (3 bumps)
         for i in range(3):
             x = 12 + i * 8
             draw.ellipse([x, 34, x + 8, 44], fill=ghost_color)
-        # eyes
         draw.rectangle([18, 14, 22, 20], fill=BLACK)
         draw.rectangle([26, 14, 30, 20], fill=BLACK)
-        # headphone band
-        draw.arc([10, 2, 38, 22], 180, 0, fill=(0, 200, 220, 255), width=2)
-        # ear cups
-        draw.rectangle([8, 12, 14, 22], fill=(0, 200, 220, 255))
-        draw.rectangle([34, 12, 40, 22], fill=(0, 200, 220, 255))
+        draw.arc([10, 2, 38, 22], 180, 0, fill=(200, 80, 255, 255), width=2)
+        draw.rectangle([8, 12, 14, 22], fill=(200, 80, 255, 255))
+        draw.rectangle([34, 12, 40, 22], fill=(200, 80, 255, 255))
 
         return img

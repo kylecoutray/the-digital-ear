@@ -725,6 +725,7 @@ def main():
                 lcd.note_count = note_count
                 lcd.mode = "RADIO" if radio_mode[0] else "GHOST"
                 lcd.muted = muted
+                lcd.push_note(vf.current_midi)
 
                 line = (
                     f"\r  FM {args.freq:>7s}"
