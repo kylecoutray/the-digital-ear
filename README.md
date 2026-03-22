@@ -156,7 +156,7 @@ the-digital-ear/
 
 A standalone embedded device that receives live FM radio, extracts the dominant melody in real time using the Digital Ear pipeline, and re-synthesizes it as a ghostly detuned tone. Runs headless on a Raspberry Pi 5.
 
-> **[Watch the demo (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Technical Report (PDF)](technical_report/ghostfm_technical_report.pdf)**
+> **[Watch the demo (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Technical Report (PDF)](https://docs.google.com/document/d/1ybPdFV4gEjY_bk80InmQOk2rB1dyYgd1dkJyzeynH10/edit?usp=sharing)**
 
 ---
 
