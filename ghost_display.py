@@ -30,12 +30,12 @@ except ImportError:
 WIDTH = 240
 HEIGHT = 240
 
-# color scheme (retro purple/green on black)
+# color scheme (purple on black, tuned for RGB565 display)
 BLACK = (0, 0, 0)
-PURPLE = (200, 100, 255)       # more saturated for RGB565 display
-GREEN = (118, 255, 3)          # #76ff03
-DIM_PURPLE = (100, 70, 160)
-DIM_GREEN = (60, 130, 2)
+PURPLE = (255, 0, 255)         # full magenta — reads as vivid purple on RGB565
+BRIGHT = (200, 80, 255)        # accent purple for values
+DIM_PURPLE = (120, 40, 180)    # dim purple for labels and secondary text
+FAINT_PURPLE = (70, 20, 110)   # very dim for separators
 WHITE = (220, 220, 220)
 
 # ST7789 GPIO pins (Waveshare 1.3" LCD HAT)
@@ -308,14 +308,14 @@ class GhostDisplay:
         draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM_PURPLE, font=font_sm)
 
         # -- separator line --
-        draw.line([(8, 68), (232, 68)], fill=DIM_PURPLE, width=1)
+        draw.line([(8, 68), (232, 68)], fill=FAINT_PURPLE, width=1)
 
         # -- conf / gate values --
-        draw.text((8, 76), "conf", fill=DIM_GREEN, font=font_sm)
-        draw.text((50, 74), f"{self.conf_th:.1f}", fill=GREEN, font=font_md)
+        draw.text((8, 76), "conf", fill=DIM_PURPLE, font=font_sm)
+        draw.text((50, 74), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
 
-        draw.text((120, 76), "gate", fill=DIM_GREEN, font=font_sm)
-        draw.text((162, 74), f"{self.rms_th:.3f}", fill=GREEN, font=font_md)
+        draw.text((120, 76), "gate", fill=DIM_PURPLE, font=font_sm)
+        draw.text((162, 74), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note --
         if self.note_name != "--":
@@ -325,15 +325,15 @@ class GhostDisplay:
             draw.text((8, 98), "--", fill=DIM_PURPLE, font=font_lg)
 
         # -- mode / mute indicator --
-        mode_color = GREEN if self.mode == "GHOST" else PURPLE
+        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
         mode_text = self.mode
         if self.muted:
             mode_text += " MUTED"
-            mode_color = DIM_PURPLE
+            mode_color = FAINT_PURPLE
         draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
 
         # -- bottom separator (top-half boundary) --
-        draw.line([(8, 120), (232, 120)], fill=DIM_PURPLE, width=1)
+        draw.line([(8, 120), (232, 120)], fill=FAINT_PURPLE, width=1)
 
         return img
 
