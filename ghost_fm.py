@@ -43,6 +43,7 @@ from digital_ear.features import FrameExtractor
 from digital_ear.harmonic_pitch import HarmonicPitchDetector
 from digital_ear.melody_extractor import MelodyExtractor
 from digital_ear.note_tracker import NoteTracker, NoteEvent
+from ghost_display import GhostDisplay
 
 
 # constants (match live_musicbox / main.py)
@@ -631,6 +632,10 @@ def main():
     keys = KeyReader()
     joy = JoystickReader()
 
+    # LCD display
+    lcd = GhostDisplay()
+    lcd.fm_freq = args.freq
+
     # shutdown
     shutting_down = threading.Event()
 
@@ -657,6 +662,7 @@ def main():
 
     keys.start()
     joy.start()
+    lcd.start()
 
     try:
         while not shutting_down.is_set():
@@ -711,6 +717,15 @@ def main():
                 mute_str = " MUTED" if muted else ""
                 mode_str = " [RADIO]" if radio_mode[0] else " [GHOST]"
 
+                # update LCD display state
+                lcd.conf_th = pipeline.conf_th
+                lcd.rms_th = pipeline.rms_th
+                lcd.note_name = midi_to_name(vf.current_midi) if vf.current_midi > 0 else "--"
+                lcd.freq_hz = vf.current_f0
+                lcd.note_count = note_count
+                lcd.mode = "RADIO" if radio_mode[0] else "GHOST"
+                lcd.muted = muted
+
                 line = (
                     f"\r  FM {args.freq:>7s}"
                     f"  |  {note_str}"
@@ -729,6 +744,7 @@ def main():
     finally:
         keys.stop()
         joy.stop()
+        lcd.stop()
         shutdown()
         pipeline.stop()
         fm.stop()
