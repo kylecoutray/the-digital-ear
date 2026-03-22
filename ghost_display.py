@@ -122,10 +122,11 @@ class ST7789Direct:
     """Minimal ST7789 driver using spidev + lgpio (Pi 5 compatible)."""
 
     def __init__(self, width=240, height=240, rotation=90,
-                 spi_speed_hz=40_000_000):
+                 spi_speed_hz=40_000_000, backlight_pct=50):
         self.width = width
         self.height = height
         self.rotation = rotation
+        self._backlight_pct = max(0, min(100, backlight_pct))
         self._spi = None
         self._gpio = None
         self._col_offset = 0
@@ -139,9 +140,16 @@ class ST7789Direct:
         self._gpio = lgpio.gpiochip_open(4)
         lgpio.gpio_claim_output(self._gpio, PIN_DC)
         lgpio.gpio_claim_output(self._gpio, PIN_RST)
-        lgpio.gpio_claim_output(self._gpio, PIN_BL)
 
-        lgpio.gpio_write(self._gpio, PIN_BL, 1)
+        # PWM backlight for camera-friendly brightness
+        if self._backlight_pct >= 100:
+            lgpio.gpio_claim_output(self._gpio, PIN_BL)
+            lgpio.gpio_write(self._gpio, PIN_BL, 1)
+        elif self._backlight_pct <= 0:
+            lgpio.gpio_claim_output(self._gpio, PIN_BL)
+            lgpio.gpio_write(self._gpio, PIN_BL, 0)
+        else:
+            lgpio.tx_pwm(self._gpio, PIN_BL, 1000, self._backlight_pct)
 
         lgpio.gpio_write(self._gpio, PIN_RST, 1)
         time.sleep(0.1)
@@ -223,7 +231,8 @@ class ST7789Direct:
 class GhostDisplay:
     """Drives the Waveshare 1.3" LCD HAT with a retro GhostFM status UI."""
 
-    def __init__(self, ghost_sprite_path: Optional[str] = None):
+    def __init__(self, ghost_sprite_path: Optional[str] = None, backlight_pct: int = 50):
+        self._backlight_pct = backlight_pct
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
         self.rms_th: float = 0.003
@@ -303,7 +312,7 @@ class GhostDisplay:
             return
 
         try:
-            self._hw = ST7789Direct(rotation=90)
+            self._hw = ST7789Direct(rotation=90, backlight_pct=self._backlight_pct)
             self._hw.begin()
         except Exception as e:
             print(f"  LCD: ST7789 not available ({e}), display disabled")

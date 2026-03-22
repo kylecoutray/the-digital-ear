@@ -621,6 +621,10 @@ def main():
         "--list-devices", action="store_true",
         help="List audio output devices and exit",
     )
+    parser.add_argument(
+        "--brightness", type=int, default=50,
+        help="LCD backlight brightness 0-100 (default: 50)",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -703,7 +707,7 @@ def main():
     joy = JoystickReader()
 
     # LCD display
-    lcd = GhostDisplay()
+    lcd = GhostDisplay(backlight_pct=args.brightness)
     lcd.fm_freq = args.freq
     lcd.paused = True  # start in idle mode
 
