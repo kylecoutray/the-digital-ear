@@ -2,9 +2,9 @@
 
 A streaming audio-to-MIDI extraction pipeline built for [Paradromics](https://paradromics.com) Qualifier. Turns a raw audio signal into discrete MIDI note events using harmonic analysis, source separation, and an online Viterbi decoder — all running in constant memory on a single thread.
 
-Built to eventually run on a Raspberry Pi in real time.
+## [In-Depth Architecture Walkthrough (Google Slides)](https://docs.google.com/presentation/d/1e4HgQPgvp3ZzGGHwky6CwUFruW1vtq-2nBTBd-b3gio/edit?usp=sharing)
 
-> **[Watch the walkthrough (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Slide deck (Google Slides)](https://docs.google.com/presentation/d/1e4HgQPgvp3ZzGGHwky6CwUFruW1vtq-2nBTBd-b3gio/edit?usp=sharing)**
+> **[Watch the Demo (YouTube)](https://youtu.be/-NZO0LaA_Zs)**
 
 ![GUI Screenshot](other/gui_screenshot.png)
 
@@ -140,6 +140,116 @@ the-digital-ear/
 | Pitch ambiguity / harmonics | Salamon & Gomez, IEEE 2012 | Harmonic salience function |
 | Frame-to-frame pitch flicker | Mauch & Dixon, ICASSP 2014 | HMM + Viterbi smoothing |
 | Static parameters fail on mixed audio | *(custom)* | Density-adaptive transition/emission costs |
+
+---
+
+---
+
+<br>
+
+# GhostFM — Stage 2: Hardware Build
+
+<p align="center">
+  <img src="assets/ghost1.png" alt="Ghost" height="100">
+  <img src="assets/ghostfm_purple1.png" alt="GhostFM" height="100">
+</p>
+
+A standalone embedded device that receives live FM radio, extracts the dominant melody in real time using the Digital Ear pipeline, and re-synthesizes it as a ghostly detuned tone. Runs headless on a Raspberry Pi 5.
+
+> **[Watch the demo (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Technical Report (PDF)](technical_report/ghostfm_technical_report.pdf)**
+
+---
+
+## Signal Flow
+
+```
+FM Broadcast → RTL-SDR → rtl_fm (demod) → Digital Ear Pipeline → GhostSynth → USB DAC → Speaker
+                           S16LE @ 44.1k    (same as Stage 1)     3 detuned
+                                                                  oscillators
+```
+
+The Digital Ear pipeline runs unchanged from Stage 1. GhostFM wraps it in a threaded architecture with live FM input and real-time audio synthesis.
+
+---
+
+## Hardware Required
+
+| Part | Purpose |
+|---|---|
+| Raspberry Pi 5 (4GB) | Runs the pipeline headless |
+| RTL-SDR Blog V4 + Dipole Antenna | FM radio reception (88–108 MHz) |
+| USB Audio Adapter (DAC) | Audio output to speaker |
+| Speaker | Plays the synthesized melody |
+| Waveshare 1.3" LCD HAT | Status display + physical controls |
+| RPi 27W USB-C Power Supply | Powers the Pi |
+
+Full BOM with prices in the [Technical Report](technical_report/ghostfm_technical_report.pdf). Total: **$222 / $250 budget**.
+
+---
+
+## Quick Start
+
+### Requirements
+
+Everything from Stage 1, plus:
+
+```bash
+pip install sounddevice gpiozero lgpio
+sudo apt install rtl-sdr
+```
+
+### Run
+
+```bash
+# Basic — tune to 89.9 FM
+python ghost_fm.py --freq 89.9M
+
+# Specify audio output device
+python ghost_fm.py --freq 89.9M --output-device 2
+
+# List available audio devices
+python ghost_fm.py --list-devices
+
+# Adjust LCD brightness (0-100, default 50)
+python ghost_fm.py --freq 89.9M --brightness 40
+```
+
+### Physical Controls (LCD HAT, mounted upside-down)
+
+| Control | Action |
+|---|---|
+| Joystick Up/Down | Confidence threshold ↑↓ |
+| Joystick Left/Right | Noise gate ↑↓ |
+| Joystick Press (short) | Mute / unmute |
+| Joystick Press (hold 1s) | Reset conf & gate to defaults |
+| KEY3 (top) | Cycle FM station preset |
+| KEY2 (middle) | Toggle Ghost / Radio mode |
+| KEY1 (bottom, short) | Pause / unpause |
+| KEY1 (bottom, hold 3s) | Quit (only when paused) |
+
+### Autostart on Boot
+
+```bash
+sudo cp ghostfm.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable ghostfm
+sudo systemctl start ghostfm
+```
+
+---
+
+## GhostFM Files
+
+```
+the-digital-ear/
+├── ghost_fm.py              # Main entry point (FM reader, pipeline, synth, controls)
+├── ghost_display.py         # LCD HAT driver + retro UI (ST7789, direct SPI)
+├── ghostfm.service          # systemd unit file for autostart
+├── assets/
+│   ├── ghost.png            # Ghost sprite for LCD idle animation
+│   └── ghostfm_purple.png   # Logo for LCD display
+└── technical_report/        # PDF technical report
+```
 
 ---
 
