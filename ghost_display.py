@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Optional
 
+import numpy as np
+
 try:
     from PIL import Image, ImageDraw, ImageFont
     _HAS_PIL = True
@@ -30,7 +32,7 @@ HEIGHT = 240
 
 # color scheme (retro purple/green on black)
 BLACK = (0, 0, 0)
-PURPLE = (179, 136, 255)       # #b388ff
+PURPLE = (200, 100, 255)       # more saturated for RGB565 display
 GREEN = (118, 255, 3)          # #76ff03
 DIM_PURPLE = (100, 70, 160)
 DIM_GREEN = (60, 130, 2)
@@ -124,21 +126,19 @@ class ST7789Direct:
         self._data([(y0 >> 8) & 0xFF, y0 & 0xFF, (y1 >> 8) & 0xFF, y1 & 0xFF])
         self._cmd(0x2C)
 
-        # convert to RGB565
-        pixels = img.tobytes()
-        buf = bytearray(self.width * self.height * 2)
-        j = 0
-        for i in range(0, len(pixels), 3):
-            r, g, b = pixels[i], pixels[i+1], pixels[i+2]
-            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            buf[j] = (rgb565 >> 8) & 0xFF
-            buf[j+1] = rgb565 & 0xFF
-            j += 2
+        # convert to RGB565 (numpy vectorized — fast + accurate)
+        arr = np.frombuffer(img.tobytes(), dtype=np.uint8).reshape(-1, 3).astype(np.uint16)
+        rgb565 = ((arr[:, 0] & 0xF8) << 8) | ((arr[:, 1] & 0xFC) << 3) | (arr[:, 2] >> 3)
+        # big-endian byte order for SPI
+        buf = np.empty(len(rgb565) * 2, dtype=np.uint8)
+        buf[0::2] = (rgb565 >> 8).astype(np.uint8)
+        buf[1::2] = (rgb565 & 0xFF).astype(np.uint8)
+        raw = buf.tobytes()
 
         # send in chunks (spidev limit)
         self._lgpio.gpio_write(self._gpio, PIN_DC, 1)
-        for i in range(0, len(buf), 4096):
-            self._spi.writebytes(buf[i:i+4096])
+        for i in range(0, len(raw), 4096):
+            self._spi.writebytes(raw[i:i+4096])
 
     def close(self):
         if self._spi:
