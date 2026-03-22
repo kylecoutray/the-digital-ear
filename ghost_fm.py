@@ -452,8 +452,12 @@ class KeyReader:
         self._old_settings = None
 
     def start(self):
-        self._old_settings = termios.tcgetattr(sys.stdin)
-        tty.setraw(sys.stdin.fileno())
+        try:
+            self._old_settings = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+        except (termios.error, OSError):
+            # no terminal (e.g., running under systemd)
+            self._old_settings = None
 
     def stop(self):
         if self._old_settings:
@@ -461,8 +465,13 @@ class KeyReader:
 
     def get_key(self) -> Optional[str]:
         """Return a key if one is waiting, else None."""
-        if select.select([sys.stdin], [], [], 0)[0]:
-            return sys.stdin.read(1)
+        if self._old_settings is None:
+            return None  # no terminal
+        try:
+            if select.select([sys.stdin], [], [], 0)[0]:
+                return sys.stdin.read(1)
+        except (OSError, ValueError):
+            pass
         return None
 
 
@@ -481,7 +490,7 @@ class JoystickReader:
     """
 
     # GPIO pin -> key mapping (flipped for upside-down mount)
-    # GPIO 13 (joystick press) handled separately for hold detection
+    # Hold-detect pins (13, 21) handled separately below
     PIN_MAP = {
         6:  's',   # physical UP    -> conf down
         19: 'w',   # physical DOWN  -> conf up
@@ -489,28 +498,31 @@ class JoystickReader:
         26: 'a',   # physical RIGHT -> gate down
         16: 'r',   # KEY3 (top when upside-down)    -> radio toggle
         20: 'f',   # KEY2 (middle)                  -> cycle FM preset
-        21: 'p',   # KEY1 (bottom when upside-down) -> pause/unpause
     }
 
-    HOLD_PIN = 13          # joystick center press
-    HOLD_THRESHOLD = 1.0   # seconds to trigger hold vs tap
+    # Hold-detect pins: (gpio, threshold_sec, short_key, hold_key)
+    HOLD_PINS = [
+        (13, 1.0, 'm', 'x'),   # joystick press: short=mute, hold=reset
+        (21, 3.0, 'p', 'Q'),   # KEY1 (bottom): short=pause, hold=quit
+    ]
 
     def __init__(self):
         self._buttons = {}
         self._prev_state = {}
         self._available = False
-        self._hold_press_time: float = 0.0   # when center was pressed
-        self._hold_was_pressed: bool = False
-        self._hold_fired: bool = False        # already fired hold action
+        # hold state per pin: {pin: (press_time, was_pressed, fired)}
+        self._hold_state: dict[int, list] = {}
 
     def start(self):
         try:
             from gpiozero import Button as GpioButton
-            all_pins = list(self.PIN_MAP.keys()) + [self.HOLD_PIN]
+            all_pins = list(self.PIN_MAP.keys()) + [h[0] for h in self.HOLD_PINS]
             for pin in all_pins:
                 btn = GpioButton(pin, pull_up=True, bounce_time=0.05)
                 self._buttons[pin] = btn
                 self._prev_state[pin] = False
+            for pin, _, _, _ in self.HOLD_PINS:
+                self._hold_state[pin] = [0.0, False, False]  # press_time, was_pressed, fired
             self._available = True
         except Exception as e:
             print(f"  Joystick not available: {e}")
@@ -519,15 +531,15 @@ class JoystickReader:
     def get_key(self) -> Optional[str]:
         """Return mapped key on new press (edge-triggered), else None.
 
-        Joystick center: returns 'm' on short press release,
-        'x' (reset) if held >= 1 second.
+        Hold-detect pins return short_key on release (if < threshold)
+        or hold_key when threshold is reached (while still pressed).
         """
         if not self._available:
             return None
 
         # check regular buttons first
         for pin, btn in self._buttons.items():
-            if pin == self.HOLD_PIN:
+            if pin in self._hold_state:
                 continue
             pressed = btn.is_pressed
             if pressed and not self._prev_state[pin]:
@@ -536,25 +548,29 @@ class JoystickReader:
             elif not pressed:
                 self._prev_state[pin] = False
 
-        # handle joystick center (hold detection)
-        if self.HOLD_PIN in self._buttons:
-            pressed = self._buttons[self.HOLD_PIN].is_pressed
-            if pressed and not self._hold_was_pressed:
+        # handle hold-detect pins
+        for pin, threshold, short_key, hold_key in self.HOLD_PINS:
+            if pin not in self._buttons:
+                continue
+            pressed = self._buttons[pin].is_pressed
+            state = self._hold_state[pin]  # [press_time, was_pressed, fired]
+
+            if pressed and not state[1]:
                 # just pressed
-                self._hold_was_pressed = True
-                self._hold_press_time = time.monotonic()
-                self._hold_fired = False
-            elif pressed and self._hold_was_pressed and not self._hold_fired:
-                # still holding — check if threshold reached
-                if time.monotonic() - self._hold_press_time >= self.HOLD_THRESHOLD:
-                    self._hold_fired = True
-                    return 'x'  # reset defaults
-            elif not pressed and self._hold_was_pressed:
+                state[1] = True
+                state[0] = time.monotonic()
+                state[2] = False
+            elif pressed and state[1] and not state[2]:
+                # still holding — check threshold
+                if time.monotonic() - state[0] >= threshold:
+                    state[2] = True
+                    return hold_key
+            elif not pressed and state[1]:
                 # just released
-                self._hold_was_pressed = False
-                if not self._hold_fired:
-                    return 'm'  # short press = mute
-                self._hold_fired = False
+                state[1] = False
+                if not state[2]:
+                    return short_key
+                state[2] = False
 
         return None
 
@@ -782,6 +798,11 @@ def main():
                     pipeline.conf_th = args.conf
                     pipeline.rms_th = args.rms
                     print(f"\r  ** RESET — conf {args.conf:.1f}  gate {args.rms:.3f} **       ")
+                elif key == 'Q':
+                    # quit (hold KEY1 3s, only when paused)
+                    if is_paused[0]:
+                        print("\r  ** SHUTTING DOWN **                                   ")
+                        break
 
             # drain viz queue
             latest_vf = None

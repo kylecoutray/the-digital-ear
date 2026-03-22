@@ -1,0 +1,16 @@
+[Unit]
+Description=GhostFM - The Digital Ear FM Synthesizer
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=kylecoutray
+WorkingDirectory=/home/kylecoutray/the-digital-ear
+ExecStart=/home/kylecoutray/the-digital-ear/venv/bin/python ghost_fm.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
