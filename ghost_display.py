@@ -104,7 +104,7 @@ class ST7789Direct:
         else:
             self._cmd(0x36); self._data(0x00)
             self._col_offset = 0; self._row_offset = 0
-        self._cmd(0x21)   # inversion on
+        self._cmd(0x20)   # inversion off (try 0x21 if colors look inverted)
         self._cmd(0x29)   # display on
         time.sleep(0.05)
 
