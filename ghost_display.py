@@ -6,7 +6,9 @@ Retro-themed status display for GhostFM.
 Runs in a daemon thread, reads pipeline state, draws to LCD at ~10 fps.
 
 Top half: ghost sprite, logo, conf/gate, current note.
-Bottom half: scrolling piano roll with Paradromics gradient colors.
+Bottom half: scrolling piano roll with rainbow-cycling colors.
+
+Idle mode: ghost bounces around like the DVD logo with centered logo.
 
 Mounted upside-down: MADCTL rotation = 90 degrees.
 Uses direct SPI via spidev + lgpio (Pi 5 compatible).
@@ -25,7 +27,7 @@ from typing import Optional
 import numpy as np
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
     _HAS_PIL = True
 except ImportError:
     _HAS_PIL = False
@@ -50,6 +52,7 @@ BRIGHT = (200, 80, 255)        # accent purple for values
 DIM = (120, 40, 180)           # dim purple for labels
 FAINT = (70, 20, 110)          # very dim for separators
 WHITE = (220, 220, 220)
+MUTED_RED = (255, 40, 40)      # flashing muted indicator
 
 # Paradromics aura gradient (orange -> blue -> purple -> red)
 AURA = [
@@ -95,15 +98,15 @@ def _hsv_to_rgb(h: float, s: float, v: float) -> tuple:
     f = h6 - i
     p = int(v * (1.0 - s) * 255)
     q = int(v * (1.0 - s * f) * 255)
-    t = int(v * (1.0 - s * (1.0 - f)) * 255)
-    v = int(v * 255)
+    t_val = int(v * (1.0 - s * (1.0 - f)) * 255)
+    v_int = int(v * 255)
     i = i % 6
-    if i == 0: return (v, t, p)
-    if i == 1: return (q, v, p)
-    if i == 2: return (p, v, t)
-    if i == 3: return (p, q, v)
-    if i == 4: return (t, p, v)
-    return (v, p, q)
+    if i == 0: return (v_int, t_val, p)
+    if i == 1: return (q, v_int, p)
+    if i == 2: return (p, v_int, t_val)
+    if i == 3: return (p, q, v_int)
+    if i == 4: return (t_val, p, v_int)
+    return (v_int, p, q)
 
 
 @dataclass
@@ -230,13 +233,16 @@ class GhostDisplay:
         self.fm_freq: str = "89.9M"
         self.mode: str = "GHOST"
         self.muted: bool = False
-        self.current_midi: int = 0  # live MIDI note number (0 = none)
+        self.current_midi: int = 0
+        self.paused: bool = True   # starts paused (idle screen)
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._hw: Optional[ST7789Direct] = None
         self._ghost_img: Optional[Image.Image] = None
+        self._ghost_img_flipped: Optional[Image.Image] = None
         self._logo_img: Optional[Image.Image] = None
+        self._logo_idle_img: Optional[Image.Image] = None  # larger logo for idle screen
         self._frame_count = 0
 
         # piano roll note history
@@ -252,14 +258,20 @@ class GhostDisplay:
         self._ghost_path = ghost_sprite_path
         self._logo_path = os.path.join(base, "assets", "ghostfm_purple.png")
 
-        # rainbow hue cycling — one full cycle every ~10 seconds
-        self._hue_cycle_rate = 0.1   # hue units per second (full cycle = 1.0)
+        # rainbow hue cycling
+        self._hue_cycle_rate = 0.1
         self._start_time = time.monotonic()
-        self._current_color = (255, 255, 255)  # current note bar color
-        self._live_color = (255, 255, 255)      # color of the live note
+        self._current_color = (255, 255, 255)
+        self._live_color = (255, 255, 255)
+
+        # DVD bounce state for idle mode
+        self._bounce_x: float = 60.0
+        self._bounce_y: float = 80.0
+        self._bounce_vx: float = 1.5   # pixels per frame
+        self._bounce_vy: float = 1.0
+        self._bounce_dir_right: bool = True  # for horizontal flip
 
     def _get_hue_color(self) -> tuple:
-        """Get the current rainbow color based on elapsed time."""
         elapsed = time.monotonic() - self._start_time
         hue = (elapsed * self._hue_cycle_rate) % 1.0
         return _hsv_to_rgb(hue, 0.9, 1.0)
@@ -271,9 +283,8 @@ class GhostDisplay:
         self._current_color = self._get_hue_color()
 
         if midi == self._live_midi:
-            return  # same note, keep extending
+            return
 
-        # close previous live note
         if self._live_midi > 0:
             self._roll_notes.append(RollNote(
                 midi=self._live_midi,
@@ -282,7 +293,6 @@ class GhostDisplay:
                 color=self._live_color,
             ))
 
-        # start new live note with current hue color
         self._live_midi = midi
         self._live_start = now if midi > 0 else 0.0
         self._live_color = self._current_color
@@ -300,23 +310,30 @@ class GhostDisplay:
             self._hw = None
             return
 
-        # load ghost sprite
+        # load ghost sprite (normal + horizontally flipped)
         try:
             raw = Image.open(self._ghost_path).convert("RGBA")
             self._ghost_img = raw.resize((48, 48), Image.NEAREST)
+            self._ghost_img_flipped = ImageOps.mirror(self._ghost_img)
         except Exception as e:
             print(f"  LCD: Ghost sprite not found ({e}), using fallback")
             self._ghost_img = self._make_fallback_ghost()
+            self._ghost_img_flipped = ImageOps.mirror(self._ghost_img)
 
-        # load logo
+        # load logo (small for active UI)
         try:
             logo_raw = Image.open(self._logo_path).convert("RGBA")
             logo_h = 28
             logo_w = int(logo_raw.width * logo_h / logo_raw.height)
             self._logo_img = logo_raw.resize((logo_w, logo_h), Image.LANCZOS)
+            # larger logo for idle screen (centered)
+            idle_h = 40
+            idle_w = int(logo_raw.width * idle_h / logo_raw.height)
+            self._logo_idle_img = logo_raw.resize((idle_w, idle_h), Image.LANCZOS)
         except Exception as e:
             print(f"  LCD: Logo not found ({e}), using text fallback")
             self._logo_img = None
+            self._logo_idle_img = None
 
         self._running = True
         self._thread = threading.Thread(target=self._render_loop, daemon=True)
@@ -338,13 +355,80 @@ class GhostDisplay:
     def _render_loop(self):
         while self._running:
             try:
-                frame = self._draw_frame()
+                if self.paused:
+                    frame = self._draw_idle()
+                else:
+                    frame = self._draw_frame()
                 if self._hw:
                     self._hw.display(frame)
                 self._frame_count += 1
             except Exception:
                 pass
             time.sleep(0.1)
+
+    # ---- IDLE MODE (DVD bounce) ----
+
+    def _draw_idle(self) -> Image.Image:
+        img = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+
+        # draw centered logo
+        if self._logo_idle_img:
+            lw, lh = self._logo_idle_img.size
+            logo_x = (WIDTH - lw) // 2
+            logo_y = (HEIGHT - lh) // 2
+            logo_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            logo_layer.paste(self._logo_idle_img, (logo_x, logo_y), self._logo_idle_img)
+            logo_mask = self._logo_idle_img.split()[3]
+            img.paste(logo_layer.crop((logo_x, logo_y, logo_x + lw, logo_y + lh)),
+                      (logo_x, logo_y), logo_mask)
+        else:
+            draw = ImageDraw.Draw(img)
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24)
+            except Exception:
+                font = ImageFont.load_default()
+            draw.text((60, 110), "GhostFM", fill=PURPLE, font=font)
+
+        # DVD-bounce the ghost
+        ghost_w, ghost_h = 48, 48
+
+        # update position
+        self._bounce_x += self._bounce_vx
+        self._bounce_y += self._bounce_vy
+
+        # bounce off edges
+        if self._bounce_x + ghost_w >= WIDTH:
+            self._bounce_x = WIDTH - ghost_w
+            self._bounce_vx = -abs(self._bounce_vx)
+            self._bounce_dir_right = False
+        elif self._bounce_x <= 0:
+            self._bounce_x = 0
+            self._bounce_vx = abs(self._bounce_vx)
+            self._bounce_dir_right = True
+
+        if self._bounce_y + ghost_h >= HEIGHT:
+            self._bounce_y = HEIGHT - ghost_h
+            self._bounce_vy = -abs(self._bounce_vy)
+        elif self._bounce_y <= 0:
+            self._bounce_y = 0
+            self._bounce_vy = abs(self._bounce_vy)
+
+        gx = int(self._bounce_x)
+        gy = int(self._bounce_y)
+
+        # pick the right facing sprite
+        sprite = self._ghost_img if self._bounce_dir_right else self._ghost_img_flipped
+
+        if sprite:
+            ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            ghost_layer.paste(sprite, (gx, gy), sprite)
+            mask = sprite.split()[3]
+            img.paste(ghost_layer.crop((gx, gy, gx + ghost_w, gy + ghost_h)),
+                      (gx, gy), mask)
+
+        return img
+
+    # ---- ACTIVE MODE ----
 
     def _draw_frame(self) -> Image.Image:
         img = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
@@ -403,13 +487,16 @@ class GhostDisplay:
         else:
             draw.text((8, 98), "--", fill=DIM, font=font_lg)
 
-        # -- mode --
+        # -- mode + muted indicator --
         mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
         mode_text = self.mode
+        draw.text((170, 86), mode_text, fill=mode_color, font=font_sm)
+
+        # flashing MUTED indicator (slow blink ~1Hz)
         if self.muted:
-            mode_text += " MUTED"
-            mode_color = FAINT
-        draw.text((170, 98), mode_text, fill=mode_color, font=font_sm)
+            blink_on = (int(time.monotonic() * 2) % 2) == 0
+            if blink_on:
+                draw.text((162, 102), "MUTED", fill=MUTED_RED, font=font_sm)
 
         # -- separator (top/bottom half boundary) --
         draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)

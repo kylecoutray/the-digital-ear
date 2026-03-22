@@ -485,6 +485,9 @@ class JoystickReader:
         5:  'd',   # physical LEFT  -> gate up
         26: 'a',   # physical RIGHT -> gate down
         13: 'r',   # joystick press -> radio toggle
+        16: 'm',   # KEY3 (top when upside-down)    -> mute
+        20: 'f',   # KEY2 (middle)                  -> cycle FM preset
+        21: 'p',   # KEY1 (bottom when upside-down) -> pause/unpause
     }
 
     def __init__(self):
@@ -618,10 +621,18 @@ def main():
             print("Try --list-devices to find the right output device index")
             sys.exit(1)
 
-    # FM reader
+    # FM presets
+    FM_PRESETS = ["89.9M", "92.3M", "96.5M", "98.9M"]
+    current_preset = [0]  # list so closure can mutate
+    # find starting preset index
+    for i, p in enumerate(FM_PRESETS):
+        if p == args.freq:
+            current_preset[0] = i
+            break
+
+    # FM reader (not started yet — starts when unpaused)
     fm = FMReader(args.freq, audio_q, squelch=args.squelch, gain=args.gain,
                   radio_q=radio_q)
-    fm.start()
 
     # pipeline
     pipeline = PipelineRunner(audio_q, viz_q, synth=synth,
@@ -636,6 +647,10 @@ def main():
     # LCD display
     lcd = GhostDisplay()
     lcd.fm_freq = args.freq
+    lcd.paused = True  # start in idle mode
+
+    # paused state — FM reader not started yet
+    is_paused = [True]
 
     # shutdown
     shutting_down = threading.Event()
@@ -695,6 +710,30 @@ def main():
                     pipeline.synth_muted = muted
                     if synth:
                         synth.muted = muted
+                elif key == 'p':
+                    # toggle pause
+                    is_paused[0] = not is_paused[0]
+                    lcd.paused = is_paused[0]
+                    if is_paused[0]:
+                        # pause: stop FM reader, silence synth
+                        fm.stop()
+                        if synth:
+                            synth.set_pitch(0)
+                        print("\r  ** PAUSED **                                          ")
+                    else:
+                        # unpause: start FM reader
+                        fm.start()
+                        print(f"\r  ** RESUMED — FM {fm.freq} **                        ")
+                elif key == 'f':
+                    # cycle FM preset
+                    current_preset[0] = (current_preset[0] + 1) % len(FM_PRESETS)
+                    new_freq = FM_PRESETS[current_preset[0]]
+                    lcd.fm_freq = new_freq
+                    if not is_paused[0]:
+                        fm.set_freq(new_freq)
+                    else:
+                        fm.freq = new_freq
+                    print(f"\r  ** FM -> {new_freq} **                                  ")
 
             # drain viz queue
             latest_vf = None
@@ -729,7 +768,7 @@ def main():
                 lcd.push_note(vf.current_midi)
 
                 line = (
-                    f"\r  FM {args.freq:>7s}"
+                    f"\r  FM {fm.freq:>7s}"
                     f"  |  {note_str}"
                     f"  |  conf {pipeline.conf_th:4.1f}"
                     f"  |  gate {pipeline.rms_th:.3f}"
