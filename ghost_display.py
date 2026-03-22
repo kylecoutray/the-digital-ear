@@ -5,8 +5,9 @@ GhostFM LCD Display — Waveshare 1.3" LCD HAT (240x240, ST7789)
 Retro-themed status display for GhostFM.
 Runs in a daemon thread, reads pipeline state, draws to LCD at ~10 fps.
 
-Mounted upside-down: display rotation = 180 degrees.
-Graceful fallback: if st7789/SPI unavailable, prints warning and no-ops.
+Mounted upside-down: MADCTL rotation = 0xC0 (180 degrees).
+Uses direct SPI via spidev + lgpio (Pi 5 compatible).
+Graceful fallback: if SPI/lgpio unavailable, prints warning and no-ops.
 """
 from __future__ import annotations
 
@@ -34,6 +35,116 @@ GREEN = (118, 255, 3)          # #76ff03
 DIM_PURPLE = (100, 70, 160)
 DIM_GREEN = (60, 130, 2)
 WHITE = (220, 220, 220)
+
+# ST7789 GPIO pins (Waveshare 1.3" LCD HAT)
+PIN_DC = 25
+PIN_RST = 27
+PIN_BL = 24
+
+
+class ST7789Direct:
+    """Minimal ST7789 driver using spidev + lgpio (Pi 5 compatible)."""
+
+    def __init__(self, width=240, height=240, rotation=180,
+                 spi_speed_hz=40_000_000):
+        self.width = width
+        self.height = height
+        self.rotation = rotation
+        self._spi = None
+        self._gpio = None
+
+    def begin(self):
+        import spidev
+        import lgpio
+
+        # GPIO
+        self._lgpio = lgpio
+        self._gpio = lgpio.gpiochip_open(4)  # Pi 5 = chip 4
+        lgpio.gpio_claim_output(self._gpio, PIN_DC)
+        lgpio.gpio_claim_output(self._gpio, PIN_RST)
+        lgpio.gpio_claim_output(self._gpio, PIN_BL)
+
+        # backlight on
+        lgpio.gpio_write(self._gpio, PIN_BL, 1)
+
+        # hardware reset
+        lgpio.gpio_write(self._gpio, PIN_RST, 1)
+        time.sleep(0.1)
+        lgpio.gpio_write(self._gpio, PIN_RST, 0)
+        time.sleep(0.1)
+        lgpio.gpio_write(self._gpio, PIN_RST, 1)
+        time.sleep(0.1)
+
+        # SPI
+        self._spi = spidev.SpiDev(0, 0)
+        self._spi.max_speed_hz = 40_000_000
+        self._spi.mode = 0
+
+        # init sequence
+        self._cmd(0x01)   # software reset
+        time.sleep(0.15)
+        self._cmd(0x11)   # sleep out
+        time.sleep(0.15)
+        self._cmd(0x3A); self._data(0x05)   # 16-bit color RGB565
+        # MADCTL for rotation
+        if self.rotation == 180:
+            self._cmd(0x36); self._data(0xC0)
+        elif self.rotation == 90:
+            self._cmd(0x36); self._data(0xA0)
+        elif self.rotation == 270:
+            self._cmd(0x36); self._data(0x60)
+        else:
+            self._cmd(0x36); self._data(0x00)
+        self._cmd(0x21)   # inversion on
+        self._cmd(0x29)   # display on
+        time.sleep(0.05)
+
+    def display(self, img: Image.Image):
+        """Push a PIL RGB image to the display."""
+        if img.size != (self.width, self.height):
+            img = img.resize((self.width, self.height))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # set window
+        self._cmd(0x2A)
+        self._data([0x00, 0x00, 0x00, self.width - 1])
+        self._cmd(0x2B)
+        self._data([0x00, 0x00, 0x00, self.height - 1])
+        self._cmd(0x2C)
+
+        # convert to RGB565
+        pixels = img.tobytes()
+        buf = bytearray(self.width * self.height * 2)
+        j = 0
+        for i in range(0, len(pixels), 3):
+            r, g, b = pixels[i], pixels[i+1], pixels[i+2]
+            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+            buf[j] = (rgb565 >> 8) & 0xFF
+            buf[j+1] = rgb565 & 0xFF
+            j += 2
+
+        # send in chunks (spidev limit)
+        self._lgpio.gpio_write(self._gpio, PIN_DC, 1)
+        for i in range(0, len(buf), 4096):
+            self._spi.writebytes(buf[i:i+4096])
+
+    def close(self):
+        if self._spi:
+            self._spi.close()
+        if self._gpio is not None:
+            self._lgpio.gpiochip_close(self._gpio)
+
+    def _cmd(self, c):
+        self._lgpio.gpio_write(self._gpio, PIN_DC, 0)
+        self._spi.writebytes([c])
+
+    def _data(self, d):
+        self._lgpio.gpio_write(self._gpio, PIN_DC, 1)
+        if isinstance(d, list):
+            self._spi.writebytes(d)
+        else:
+            self._spi.writebytes([d])
 
 
 class GhostDisplay:
@@ -64,7 +175,7 @@ class GhostDisplay:
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._display = None
+        self._hw: Optional[ST7789Direct] = None
         self._ghost_img: Optional[Image.Image] = None
         self._frame_count = 0
 
@@ -80,24 +191,13 @@ class GhostDisplay:
             print("  LCD: Pillow not available, display disabled")
             return
 
-        # try to init ST7789
+        # try to init ST7789 via direct SPI
         try:
-            import st7789
-            self._display = st7789.ST7789(
-                height=240,
-                width=240,
-                rotation=180,
-                port=0,
-                cs=0,         # CE0 = GPIO 8
-                dc=25,
-                backlight=24,
-                rst=27,
-                spi_speed_hz=40_000_000,
-            )
-            self._display.begin()
+            self._hw = ST7789Direct(rotation=180)
+            self._hw.begin()
         except Exception as e:
             print(f"  LCD: ST7789 not available ({e}), display disabled")
-            self._display = None
+            self._hw = None
             return
 
         # load ghost sprite
@@ -118,11 +218,11 @@ class GhostDisplay:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
-        if self._display:
+        if self._hw:
             try:
-                # blank the screen
                 blank = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
-                self._display.display(blank)
+                self._hw.display(blank)
+                self._hw.close()
             except Exception:
                 pass
 
@@ -131,8 +231,8 @@ class GhostDisplay:
         while self._running:
             try:
                 frame = self._draw_frame()
-                if self._display:
-                    self._display.display(frame)
+                if self._hw:
+                    self._hw.display(frame)
                 self._frame_count += 1
             except Exception:
                 pass
