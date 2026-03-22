@@ -45,8 +45,7 @@ from digital_ear.melody_extractor import MelodyExtractor
 from digital_ear.note_tracker import NoteTracker, NoteEvent
 
 
-# -- constants (match live_musicbox / main.py) --
-
+# constants (match live_musicbox / main.py)
 SR = 44100
 BLOCK_SIZE = 2048
 N_FFT = 2048
@@ -466,6 +465,65 @@ class KeyReader:
         return None
 
 
+# -- joystick input (GPIO, Waveshare 1.3" LCD HAT, mounted upside-down) --
+
+class JoystickReader:
+    """Reads joystick on Waveshare 1.3" LCD HAT via GPIO.
+
+    Mounted upside-down, so directions are flipped:
+      physical UP   (GPIO 6)  -> 's'  (conf down)
+      physical DOWN (GPIO 19) -> 'w'  (conf up)
+      physical LEFT (GPIO 5)  -> 'd'  (gate up)
+      physical RIGHT(GPIO 26) -> 'a'  (gate down)
+    """
+
+    # GPIO pin -> key mapping (flipped for upside-down mount)
+    PIN_MAP = {
+        6:  's',   # physical UP    -> conf down
+        19: 'w',   # physical DOWN  -> conf up
+        5:  'd',   # physical LEFT  -> gate up
+        26: 'a',   # physical RIGHT -> gate down
+    }
+
+    def __init__(self):
+        self._buttons = {}
+        self._prev_state = {}
+        self._available = False
+
+    def start(self):
+        try:
+            from gpiozero import Button as GpioButton
+            for pin in self.PIN_MAP:
+                btn = GpioButton(pin, pull_up=True, bounce_time=0.05)
+                self._buttons[pin] = btn
+                self._prev_state[pin] = False
+            self._available = True
+        except Exception as e:
+            print(f"  Joystick not available: {e}")
+            self._available = False
+
+    def get_key(self) -> Optional[str]:
+        """Return mapped key on new press (edge-triggered), else None."""
+        if not self._available:
+            return None
+        for pin, btn in self._buttons.items():
+            pressed = btn.is_pressed
+            if pressed and not self._prev_state[pin]:
+                self._prev_state[pin] = True
+                return self.PIN_MAP[pin]
+            elif not pressed:
+                self._prev_state[pin] = False
+        return None
+
+    def stop(self):
+        for btn in self._buttons.values():
+            try:
+                btn.close()
+            except Exception:
+                pass
+        self._buttons.clear()
+
+
 # -- main --
 
 def main():
@@ -571,6 +629,7 @@ def main():
 
     # keyboard reader
     keys = KeyReader()
+    joy = JoystickReader()
 
     # shutdown
     shutting_down = threading.Event()
@@ -597,11 +656,12 @@ def main():
     muted = False
 
     keys.start()
+    joy.start()
 
     try:
         while not shutting_down.is_set():
-            # handle keypresses
-            key = keys.get_key()
+            # handle keypresses (keyboard or joystick)
+            key = keys.get_key() or joy.get_key()
             if key:
                 if key == 'q':
                     break
@@ -668,6 +728,7 @@ def main():
 
     finally:
         keys.stop()
+        joy.stop()
         shutdown()
         pipeline.stop()
         fm.stop()
