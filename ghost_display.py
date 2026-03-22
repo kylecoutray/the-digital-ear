@@ -494,7 +494,7 @@ class GhostDisplay:
                 draw.text((180, 8), "MUTED", fill=MUTED_RED, font=font_sm)
 
         # -- mode --
-        mode_color = BRIGHT if self.mode == "GHOST" else PURPLE
+        mode_color = BRIGHT if self.mode == "GHOST" else WHITE
         if self.muted:
             mode_color = FAINT
         draw.text((170, 98), self.mode, fill=mode_color, font=font_sm)
