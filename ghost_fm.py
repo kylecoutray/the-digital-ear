@@ -496,8 +496,8 @@ class JoystickReader:
         19: 'w',   # physical DOWN  -> conf up
         5:  'd',   # physical LEFT  -> gate up
         26: 'a',   # physical RIGHT -> gate down
-        16: 'r',   # KEY3 (top when upside-down)    -> radio toggle
-        20: 'f',   # KEY2 (middle)                  -> cycle FM preset
+        16: 'f',   # KEY3 (top when upside-down)    -> cycle FM preset
+        20: 'r',   # KEY2 (middle)                  -> radio toggle
     }
 
     # Hold-detect pins: (gpio, threshold_sec, short_key, hold_key)
