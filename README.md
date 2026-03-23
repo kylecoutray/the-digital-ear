@@ -158,6 +158,7 @@ A standalone embedded device that receives live FM radio, extracts the dominant 
 
 > **[Watch the demo (YouTube)](https://youtu.be/-NZO0LaA_Zs)** · **[Technical Report (PDF)](https://docs.google.com/document/d/1ybPdFV4gEjY_bk80InmQOk2rB1dyYgd1dkJyzeynH10/edit?usp=sharing)**
 
+![GhostFM Screenshot](other/ghostfm_ss.png)
 ---
 
 ## Signal Flow
