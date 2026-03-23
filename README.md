@@ -150,8 +150,8 @@ the-digital-ear/
 # GhostFM — Stage 2: Hardware Build
 
 <p align="center">
-  <img src="assets/ghost1.png" alt="Ghost" height="100">
-  <img src="assets/ghostfm_purple1.png" alt="GhostFM" height="100">
+  <img src="assets/ghost_normal.png" alt="Ghost" height="100">
+  <img src="assets/ghostfm_purple_normal.png" alt="GhostFM" height="100">
 </p>
 
 A standalone embedded device that receives live FM radio, extracts the dominant melody in real time using the Digital Ear pipeline, and re-synthesizes it as a ghostly detuned tone. Runs headless on a Raspberry Pi 5.
