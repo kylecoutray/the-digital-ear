@@ -184,7 +184,7 @@ The Digital Ear pipeline runs unchanged from Stage 1. GhostFM wraps it in a thre
 | Waveshare 1.3" LCD HAT | Status display + physical controls |
 | RPi 27W USB-C Power Supply | Powers the Pi |
 
-Full BOM with prices in the [Technical Report](technical_report/ghostfm_technical_report.pdf). Total: **$222 / $250 budget**.
+Full BOM with prices in the [Technical Report](https://docs.google.com/document/d/1ybPdFV4gEjY_bk80InmQOk2rB1dyYgd1dkJyzeynH10/edit?usp=sharing). Total: **$222 / $250 budget**.
 
 ---
 
