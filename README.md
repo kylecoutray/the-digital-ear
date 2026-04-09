@@ -223,7 +223,8 @@ python ghost_fm.py --freq 89.9M --brightness 40
 | Joystick Left/Right | Noise gate ↑↓ |
 | Joystick Press (short) | Mute / unmute |
 | Joystick Press (hold 1s) | Reset conf & gate to defaults |
-| KEY3 (top) | Cycle FM station preset |
+| KEY3 (top, short) | Cycle FM station preset |
+| KEY3 (top, hold 1.5s) | Enter manual frequency edit mode |
 | KEY2 (middle) | Toggle Ghost / Radio mode |
 | KEY1 (bottom, short) | Pause / unpause |
 | KEY1 (bottom, hold 3s) | Quit (only when paused) |

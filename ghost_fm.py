@@ -496,13 +496,13 @@ class JoystickReader:
         19: 'w',   # physical DOWN  -> conf up
         5:  'd',   # physical LEFT  -> gate up
         26: 'a',   # physical RIGHT -> gate down
-        16: 'f',   # KEY3 (top when upside-down)    -> cycle FM preset
         20: 'r',   # KEY2 (middle)                  -> radio toggle
     }
 
     # Hold-detect pins: (gpio, threshold_sec, short_key, hold_key)
     HOLD_PINS = [
         (13, 1.0, 'm', 'x'),   # joystick press: short=mute, hold=reset
+        (16, 1.5, 'f', 'e'),   # KEY3: short=cycle preset, hold 1.5s=edit freq
         (21, 3.0, 'p', 'Q'),   # KEY1 (bottom): short=pause, hold=quit
     ]
 
@@ -533,6 +533,7 @@ class JoystickReader:
 
         Hold-detect pins return short_key on release (if < threshold)
         or hold_key when threshold is reached (while still pressed).
+        Joystick center: short = mute, hold 3s = edit mode.
         """
         if not self._available:
             return None
@@ -684,7 +685,7 @@ def main():
             sys.exit(1)
 
     # FM presets
-    FM_PRESETS = ["89.9M", "92.3M", "96.5M", "98.9M"]
+    FM_PRESETS = ["89.5M", "89.1M", "91.3M", "89.9M"]
     current_preset = [0]  # list so closure can mutate
     # find starting preset index
     for i, p in enumerate(FM_PRESETS):
@@ -731,12 +732,24 @@ def main():
     print(f"  ──────────────────────────────────────────────")
     print(f"  w/s  confidence ↑↓    a/d  noise gate ↑↓")
     print(f"  r    radio passthrough    m    mute synth")
+    print(f"  e    edit frequency       f    cycle preset")
     print(f"  q    quit")
     print(f"  ──────────────────────────────────────────────\n")
 
     note_count = 0
     last_print = 0.0
     muted = False
+
+    # manual frequency edit mode (triple-click joystick center)
+    edit_mode = [False]
+    # store freq as tenths of MHz: 89.5 -> 895, 101.1 -> 1011
+    def freq_to_tenths(f: str) -> int:
+        return int(round(float(f.rstrip('Mm')) * 10))
+    def tenths_to_freq(t: int) -> str:
+        return f"{t / 10:.1f}M"
+    edit_tenths = [freq_to_tenths(args.freq)]
+    edit_cursor = [0]  # 0=tens, 1=ones, 2=tenths
+    EDIT_STEPS = [100, 10, 1]  # increment per cursor position (in tenths)
 
     keys.start()
     joy.start()
@@ -747,8 +760,57 @@ def main():
             # handle keypresses (keyboard or joystick)
             key = keys.get_key() or joy.get_key()
             if key:
+                # ---- EDIT MODE: joystick remapped to freq digit editing ----
+                if edit_mode[0]:
+                    if key == 'e':
+                        # confirm & exit edit mode
+                        edit_mode[0] = False
+                        lcd.edit_mode = False
+                        new_freq = tenths_to_freq(edit_tenths[0])
+                        lcd.fm_freq = new_freq
+                        if not is_paused[0]:
+                            fm.set_freq(new_freq)
+                        else:
+                            fm.freq = new_freq
+                        print(f"\r  ** EDIT CONFIRMED — FM {new_freq} **                 ")
+                    elif key == 'w':
+                        # joystick up → increment digit
+                        edit_tenths[0] = min(1080, edit_tenths[0] + EDIT_STEPS[edit_cursor[0]])
+                        lcd.edit_freq_str = tenths_to_freq(edit_tenths[0]).rstrip('M')
+                    elif key == 's':
+                        # joystick down → decrement digit
+                        edit_tenths[0] = max(875, edit_tenths[0] - EDIT_STEPS[edit_cursor[0]])
+                        lcd.edit_freq_str = tenths_to_freq(edit_tenths[0]).rstrip('M')
+                    elif key == 'a':
+                        # joystick left → move cursor left
+                        edit_cursor[0] = max(0, edit_cursor[0] - 1)
+                        lcd.edit_cursor = edit_cursor[0]
+                    elif key == 'd':
+                        # joystick right → move cursor right
+                        edit_cursor[0] = min(2, edit_cursor[0] + 1)
+                        lcd.edit_cursor = edit_cursor[0]
+                    elif key == 'm':
+                        # short press → cancel edit, restore original freq
+                        edit_mode[0] = False
+                        lcd.edit_mode = False
+                        print(f"\r  ** EDIT CANCELLED **                                  ")
+                    elif key == 'q':
+                        break
+                    # ignore other keys during edit mode
+                    continue
+
+                # ---- NORMAL MODE ----
                 if key == 'q':
                     break
+                elif key == 'e':
+                    # enter edit mode (hold joystick center 3s)
+                    edit_mode[0] = True
+                    edit_tenths[0] = freq_to_tenths(fm.freq)
+                    edit_cursor[0] = 2  # start on tenths digit (finest control)
+                    lcd.edit_mode = True
+                    lcd.edit_freq_str = tenths_to_freq(edit_tenths[0]).rstrip('M')
+                    lcd.edit_cursor = edit_cursor[0]
+                    print(f"\r  ** EDIT MODE — use joystick to change freq **         ")
                 elif key == 'w':
                     pipeline.conf_th = min(25.0, pipeline.conf_th + 0.5)
                 elif key == 's':

@@ -244,6 +244,9 @@ class GhostDisplay:
         self.muted: bool = False
         self.current_midi: int = 0
         self.paused: bool = True   # starts paused (idle screen)
+        self.edit_mode: bool = False
+        self.edit_freq_str: str = ""   # e.g. "89.5" (no M suffix)
+        self.edit_cursor: int = 0      # 0=tens, 1=ones, 2=tenths
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -477,8 +480,38 @@ class GhostDisplay:
         else:
             draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
 
-        # -- FM frequency --
-        draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_md)
+        # -- FM frequency (with edit mode support) --
+        if self.edit_mode:
+            # show "EDIT" label + frequency with flashing cursor digit
+            draw.text((64, 42), "EDIT ", fill=MUTED_RED, font=font_md)
+            freq_str = self.edit_freq_str  # e.g. "89.5"
+            blink_on = (int(time.monotonic() * 3) % 2) == 0
+
+            # map cursor (0=tens, 1=ones, 2=tenths) to char index in freq_str
+            # freq_str is like "89.5" (len 4) or "101.1" (len 5)
+            digits_only = [i for i, c in enumerate(freq_str) if c.isdigit()]
+            # cursor 0 = first digit, 1 = second digit, 2 = last digit (tenths)
+            cursor_map = {0: digits_only[0] if len(digits_only) > 0 else 0,
+                          1: digits_only[1] if len(digits_only) > 1 else 1,
+                          2: digits_only[-1] if digits_only else len(freq_str)-1}
+            cursor_char_idx = cursor_map.get(self.edit_cursor, 0)
+
+            # draw each character, highlighting the cursor digit
+            x_pos = 110
+            for i, ch in enumerate(freq_str):
+                if i == cursor_char_idx and blink_on:
+                    # draw highlighted (inverted)
+                    bbox = font_md.getbbox(ch)
+                    ch_w = bbox[2] - bbox[0]
+                    draw.rectangle([x_pos - 1, 41, x_pos + ch_w + 1, 60], fill=BRIGHT)
+                    draw.text((x_pos, 42), ch, fill=BLACK, font=font_md)
+                else:
+                    color = BRIGHT if i == cursor_char_idx else WHITE
+                    draw.text((x_pos, 42), ch, fill=color, font=font_md)
+                bbox = font_md.getbbox(ch)
+                x_pos += bbox[2] - bbox[0] + 1
+        else:
+            draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_md)
 
         # -- separator --
         draw.line([(8, 68), (232, 68)], fill=FAINT, width=1)
