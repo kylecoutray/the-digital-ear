@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
 
 from digital_ear.preprocess import Preprocessor, rms
 from digital_ear.hpss import HPSS
@@ -53,6 +52,17 @@ N_FFT = 2048
 HOP = 512
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def load_sounddevice():
+    try:
+        import sounddevice as sd
+        return sd
+    except OSError as e:
+        raise RuntimeError(
+            "sounddevice could not load PortAudio. Install it with: "
+            "sudo apt install -y libportaudio2"
+        ) from e
 
 
 def midi_to_name(m: int) -> str:
@@ -721,6 +731,8 @@ def main():
     if args.display_test:
         run_display_test(args)
         return
+
+    sd = load_sounddevice()
 
     if args.list_devices:
         print(sd.query_devices())
