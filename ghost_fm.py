@@ -59,6 +59,49 @@ def midi_to_name(m: int) -> str:
     return f"{NOTE_NAMES[m % 12]}{m // 12 - 1}"
 
 
+def add_display_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--display-backend",
+        choices=["st7789", "fbdev", "none"],
+        default="st7789",
+        help="Display output backend (default: st7789)",
+    )
+    parser.add_argument(
+        "--fbdev",
+        default="/dev/fb1",
+        help="Framebuffer device for --display-backend fbdev (default: /dev/fb1)",
+    )
+    parser.add_argument(
+        "--display-width",
+        type=int,
+        default=240,
+        help="Display width in pixels (default: 240; use 480 for MHS35)",
+    )
+    parser.add_argument(
+        "--display-height",
+        type=int,
+        default=240,
+        help="Display height in pixels (default: 240; use 320 for MHS35)",
+    )
+    parser.add_argument(
+        "--display-rotate",
+        type=int,
+        choices=[0, 90, 180, 270],
+        default=0,
+        help="Software rotation for framebuffer output (default: 0)",
+    )
+    parser.add_argument(
+        "--no-joystick",
+        action="store_true",
+        help="Disable GPIO joystick/HAT button input",
+    )
+    parser.add_argument(
+        "--display-test",
+        action="store_true",
+        help="Run an animated display test without SDR/audio/pipeline startup",
+    )
+
+
 @dataclass
 class VizFrame:
     """One frame of pipeline output for status display."""
@@ -69,6 +112,52 @@ class VizFrame:
     current_midi: int = 0
     confidence: float = 0.0
     notes: list = field(default_factory=list)
+
+
+def make_display(args) -> GhostDisplay:
+    return GhostDisplay(
+        backlight_pct=args.brightness,
+        backend=args.display_backend,
+        fbdev=args.fbdev,
+        width=args.display_width,
+        height=args.display_height,
+        rotation=args.display_rotate,
+    )
+
+
+def run_display_test(args):
+    lcd = make_display(args)
+    lcd.fm_freq = args.freq
+    lcd.paused = False
+    lcd.conf_th = args.conf
+    lcd.rms_th = args.rms
+    lcd.mode = "GHOST"
+    lcd.start()
+
+    if args.display_backend == "none":
+        print("  Display test running with --display-backend none; frames render but are not written.")
+    print("  Display test running. Press Ctrl-C to stop.")
+
+    notes = [60, 64, 67, 72, 76, 79, 84, 79, 76, 72, 67, 64]
+    try:
+        i = 0
+        while True:
+            midi = notes[i % len(notes)]
+            lcd.note_name = midi_to_name(midi)
+            lcd.freq_hz = 440.0 * (2.0 ** ((midi - 69) / 12.0))
+            lcd.note_count = i
+            lcd.conf_th = args.conf + ((i % 8) * 0.5)
+            lcd.rms_th = args.rms + ((i % 5) * 0.001)
+            lcd.muted = (i % 10) >= 8
+            lcd.mode = "RADIO" if (i % 12) >= 9 else "GHOST"
+            lcd.push_note(midi)
+            i += 1
+            time.sleep(0.45)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        lcd.stop()
+        print("\n  Display test stopped.\n")
 
 
 # -- ghost synth (detuned layered oscillators + vibrato) --
@@ -626,7 +715,12 @@ def main():
         "--brightness", type=int, default=50,
         help="LCD backlight brightness 0-100 (default: 50)",
     )
+    add_display_args(parser)
     args = parser.parse_args()
+
+    if args.display_test:
+        run_display_test(args)
+        return
 
     if args.list_devices:
         print(sd.query_devices())
@@ -708,7 +802,7 @@ def main():
     joy = JoystickReader()
 
     # LCD display
-    lcd = GhostDisplay(backlight_pct=args.brightness)
+    lcd = make_display(args)
     lcd.fm_freq = args.freq
     lcd.paused = True  # start in idle mode
 
@@ -752,7 +846,8 @@ def main():
     EDIT_STEPS = [100, 10, 1]  # increment per cursor position (in tenths)
 
     keys.start()
-    joy.start()
+    if not args.no_joystick:
+        joy.start()
     lcd.start()
 
     try:

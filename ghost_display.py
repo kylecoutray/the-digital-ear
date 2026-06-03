@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GhostFM LCD Display — Waveshare 1.3" LCD HAT (240x240, ST7789)
+GhostFM display rendering.
 
 Retro-themed status display for GhostFM.
 Runs in a daemon thread, reads pipeline state, draws to LCD at ~10 fps.
@@ -11,8 +11,8 @@ Bottom half: scrolling piano roll with rainbow-cycling colors.
 Idle mode: ghost bounces around like the DVD logo with centered logo.
 
 Mounted upside-down: MADCTL rotation = 90 degrees.
-Uses direct SPI via spidev + lgpio (Pi 5 compatible).
-Graceful fallback: if SPI/lgpio unavailable, prints warning and no-ops.
+Supports the original Waveshare 1.3" ST7789 HAT and Linux framebuffer
+devices such as the LCD-show MHS35 driver on /dev/fb1.
 """
 from __future__ import annotations
 
@@ -33,13 +33,6 @@ except ImportError:
     _HAS_PIL = False
 
 
-# display dimensions
-WIDTH = 240
-HEIGHT = 240
-
-# piano roll region (bottom half)
-ROLL_TOP = 124       # just below the separator at y=120
-ROLL_HEIGHT = HEIGHT - ROLL_TOP
 MIDI_LO = 48         # C3
 MIDI_HI = 84         # C6
 NUM_KEYS = MIDI_HI - MIDI_LO
@@ -228,11 +221,74 @@ class ST7789Direct:
             self._spi.writebytes([d])
 
 
-class GhostDisplay:
-    """Drives the Waveshare 1.3" LCD HAT with a retro GhostFM status UI."""
+class FramebufferRGB565:
+    """Linux framebuffer writer for LCD-show SPI displays."""
 
-    def __init__(self, ghost_sprite_path: Optional[str] = None, backlight_pct: int = 50):
+    def __init__(self, path="/dev/fb1", width=480, height=320, rotation=0):
+        self.path = path
+        self.width = width
+        self.height = height
+        self.rotation = rotation
+        self._fb = None
+
+    def begin(self):
+        self._fb = open(self.path, "r+b", buffering=0)
+
+    def display(self, img: Image.Image):
+        if self.rotation:
+            img = img.rotate(-self.rotation, expand=True)
+        if img.size != (self.width, self.height):
+            img = img.resize((self.width, self.height), Image.BICUBIC)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        raw = image_to_rgb565(img)
+        expected = self.width * self.height * 2
+        if len(raw) != expected:
+            raise ValueError(f"framebuffer frame is {len(raw)} bytes, expected {expected}")
+
+        self._fb.seek(0)
+        self._fb.write(raw)
+
+    def close(self):
+        if self._fb:
+            self._fb.close()
+            self._fb = None
+
+
+def image_to_rgb565(img: Image.Image) -> bytes:
+    """Convert an RGB Pillow image to big-endian RGB565 bytes."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    arr = np.frombuffer(img.tobytes(), dtype=np.uint8).reshape(-1, 3).astype(np.uint16)
+    rgb565 = ((arr[:, 0] & 0xF8) << 8) | ((arr[:, 1] & 0xFC) << 3) | (arr[:, 2] >> 3)
+    buf = np.empty(len(rgb565) * 2, dtype=np.uint8)
+    buf[0::2] = (rgb565 >> 8).astype(np.uint8)
+    buf[1::2] = (rgb565 & 0xFF).astype(np.uint8)
+    return buf.tobytes()
+
+
+class GhostDisplay:
+    """Drives a GhostFM status UI on ST7789 or framebuffer displays."""
+
+    def __init__(
+        self,
+        ghost_sprite_path: Optional[str] = None,
+        backlight_pct: int = 50,
+        backend: str = "st7789",
+        fbdev: str = "/dev/fb1",
+        width: int = 240,
+        height: int = 240,
+        rotation: int = 0,
+    ):
         self._backlight_pct = backlight_pct
+        self.backend = backend
+        self.fbdev = fbdev
+        self.width = width
+        self.height = height
+        self.rotation = rotation
+        self.roll_top = int(self.height * 0.52)
+        self.roll_height = self.height - self.roll_top
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
         self.rms_th: float = 0.003
@@ -250,7 +306,7 @@ class GhostDisplay:
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._hw: Optional[ST7789Direct] = None
+        self._hw: Optional[object] = None
         self._ghost_img: Optional[Image.Image] = None
         self._ghost_img_flipped: Optional[Image.Image] = None
         self._logo_img: Optional[Image.Image] = None
@@ -314,18 +370,38 @@ class GhostDisplay:
             print("  LCD: Pillow not available, display disabled")
             return
 
-        try:
-            self._hw = ST7789Direct(rotation=90, backlight_pct=self._backlight_pct)
-            self._hw.begin()
-        except Exception as e:
-            print(f"  LCD: ST7789 not available ({e}), display disabled")
+        if self.backend == "st7789":
+            try:
+                self._hw = ST7789Direct(rotation=90, backlight_pct=self._backlight_pct)
+                self._hw.begin()
+            except Exception as e:
+                print(f"  LCD: ST7789 not available ({e}), display disabled")
+                self._hw = None
+                return
+        elif self.backend == "fbdev":
+            try:
+                self._hw = FramebufferRGB565(
+                    path=self.fbdev,
+                    width=self.width,
+                    height=self.height,
+                    rotation=self.rotation,
+                )
+                self._hw.begin()
+            except Exception as e:
+                print(f"  LCD: framebuffer not available ({e}), display disabled")
+                self._hw = None
+                return
+        elif self.backend == "none":
             self._hw = None
+        else:
+            print(f"  LCD: unknown display backend {self.backend!r}, display disabled")
             return
 
         # load ghost sprite (normal + horizontally flipped)
         try:
             raw = Image.open(self._ghost_path).convert("RGBA")
-            self._ghost_img = raw.resize((48, 48), Image.NEAREST)
+            ghost_size = max(48, int(min(self.width, self.height) * 0.18))
+            self._ghost_img = raw.resize((ghost_size, ghost_size), Image.NEAREST)
             self._ghost_img_flipped = ImageOps.mirror(self._ghost_img)
         except Exception as e:
             print(f"  LCD: Ghost sprite not found ({e}), using fallback")
@@ -335,11 +411,11 @@ class GhostDisplay:
         # load logo (small for active UI)
         try:
             logo_raw = Image.open(self._logo_path).convert("RGBA")
-            logo_h = 28
+            logo_h = max(28, int(self.height * 0.09))
             logo_w = int(logo_raw.width * logo_h / logo_raw.height)
             self._logo_img = logo_raw.resize((logo_w, logo_h), Image.LANCZOS)
             # larger logo for idle screen (centered)
-            idle_h = 40
+            idle_h = max(40, int(self.height * 0.13))
             idle_w = int(logo_raw.width * idle_h / logo_raw.height)
             self._logo_idle_img = logo_raw.resize((idle_w, idle_h), Image.LANCZOS)
         except Exception as e:
@@ -358,7 +434,7 @@ class GhostDisplay:
             self._thread.join(timeout=2.0)
         if self._hw:
             try:
-                blank = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+                blank = Image.new("RGB", (self.width, self.height), BLACK)
                 self._hw.display(blank)
                 self._hw.close()
             except Exception:
@@ -381,14 +457,14 @@ class GhostDisplay:
     # ---- IDLE MODE (DVD bounce) ----
 
     def _draw_idle(self) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+        img = Image.new("RGB", (self.width, self.height), BLACK)
 
         # draw centered logo
         if self._logo_idle_img:
             lw, lh = self._logo_idle_img.size
-            logo_x = (WIDTH - lw) // 2
-            logo_y = (HEIGHT - lh) // 2
-            logo_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            logo_x = (self.width - lw) // 2
+            logo_y = (self.height - lh) // 2
+            logo_layer = Image.new("RGB", (self.width, self.height), BLACK)
             logo_layer.paste(self._logo_idle_img, (logo_x, logo_y), self._logo_idle_img)
             logo_mask = self._logo_idle_img.split()[3]
             img.paste(logo_layer.crop((logo_x, logo_y, logo_x + lw, logo_y + lh)),
@@ -396,21 +472,21 @@ class GhostDisplay:
         else:
             draw = ImageDraw.Draw(img)
             try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24)
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", max(24, int(self.height * 0.08)))
             except Exception:
                 font = ImageFont.load_default()
-            draw.text((60, 110), "GhostFM", fill=PURPLE, font=font)
+            draw.text((self.width * 0.25, self.height * 0.45), "GhostFM", fill=PURPLE, font=font)
 
         # DVD-bounce the ghost
-        ghost_w, ghost_h = 48, 48
+        ghost_w, ghost_h = self._ghost_img.size if self._ghost_img else (48, 48)
 
         # update position
         self._bounce_x += self._bounce_vx
         self._bounce_y += self._bounce_vy
 
         # bounce off edges
-        if self._bounce_x + ghost_w >= WIDTH:
-            self._bounce_x = WIDTH - ghost_w
+        if self._bounce_x + ghost_w >= self.width:
+            self._bounce_x = self.width - ghost_w
             self._bounce_vx = -abs(self._bounce_vx)
             self._bounce_dir_right = False
         elif self._bounce_x <= 0:
@@ -418,8 +494,8 @@ class GhostDisplay:
             self._bounce_vx = abs(self._bounce_vx)
             self._bounce_dir_right = True
 
-        if self._bounce_y + ghost_h >= HEIGHT:
-            self._bounce_y = HEIGHT - ghost_h
+        if self._bounce_y + ghost_h >= self.height:
+            self._bounce_y = self.height - ghost_h
             self._bounce_vy = -abs(self._bounce_vy)
         elif self._bounce_y <= 0:
             self._bounce_y = 0
@@ -432,7 +508,7 @@ class GhostDisplay:
         sprite = self._ghost_img_flipped if self._bounce_dir_right else self._ghost_img
 
         if sprite:
-            ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            ghost_layer = Image.new("RGB", (self.width, self.height), BLACK)
             ghost_layer.paste(sprite, (gx, gy), sprite)
             mask = sprite.split()[3]
             img.paste(ghost_layer.crop((gx, gy, gx + ghost_w, gy + ghost_h)),
@@ -443,13 +519,13 @@ class GhostDisplay:
     # ---- ACTIVE MODE ----
 
     def _draw_frame(self) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+        img = Image.new("RGB", (self.width, self.height), BLACK)
         draw = ImageDraw.Draw(img)
 
         try:
-            font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
-            font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 16)
-            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13)
+            font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", max(20, int(self.height * 0.072)))
+            font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", max(16, int(self.height * 0.055)))
+            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", max(13, int(self.height * 0.044)))
         except Exception:
             font_lg = ImageFont.load_default()
             font_md = font_lg
@@ -457,33 +533,37 @@ class GhostDisplay:
 
         # -- ghost sprite (bobbing animation) --
         bob_offset = int(3 * math.sin(self._frame_count * 0.4))
-        ghost_x = 8
-        ghost_y = 10 + bob_offset
+        margin = max(8, int(self.width * 0.025))
+        ghost_x = margin
+        ghost_y = max(8, int(self.height * 0.04)) + bob_offset
 
         if self._ghost_img:
-            ghost_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            ghost_w, ghost_h = self._ghost_img.size
+            ghost_layer = Image.new("RGB", (self.width, self.height), BLACK)
             ghost_layer.paste(self._ghost_img, (ghost_x, ghost_y), self._ghost_img)
             mask = self._ghost_img.split()[3]
-            img.paste(ghost_layer.crop((ghost_x, ghost_y, ghost_x + 48, ghost_y + 48)),
+            img.paste(ghost_layer.crop((ghost_x, ghost_y, ghost_x + ghost_w, ghost_y + ghost_h)),
                       (ghost_x, ghost_y), mask)
 
         # -- title (logo or text fallback) --
+        title_x = margin + max(62, int(min(self.width, self.height) * 0.24))
         if self._logo_img:
-            logo_x = 64
-            logo_y = 12
-            logo_layer = Image.new("RGB", (WIDTH, HEIGHT), BLACK)
+            logo_x = title_x
+            logo_y = max(10, int(self.height * 0.04))
+            logo_layer = Image.new("RGB", (self.width, self.height), BLACK)
             logo_layer.paste(self._logo_img, (logo_x, logo_y), self._logo_img)
             logo_w, logo_h = self._logo_img.size
             logo_mask = self._logo_img.split()[3]
             img.paste(logo_layer.crop((logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)),
                       (logo_x, logo_y), logo_mask)
         else:
-            draw.text((64, 14), "GhostFM", fill=PURPLE, font=font_lg)
+            draw.text((title_x, max(10, int(self.height * 0.04))), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency (with edit mode support) --
+        freq_y = max(42, int(self.height * 0.14))
         if self.edit_mode:
             # show "EDIT" label + frequency with flashing cursor digit
-            draw.text((64, 42), "EDIT ", fill=MUTED_RED, font=font_md)
+            draw.text((title_x, freq_y), "EDIT ", fill=MUTED_RED, font=font_md)
             freq_str = self.edit_freq_str  # e.g. "89.5"
             blink_on = (int(time.monotonic() * 3) % 2) == 0
 
@@ -497,52 +577,55 @@ class GhostDisplay:
             cursor_char_idx = cursor_map.get(self.edit_cursor, 0)
 
             # draw each character, highlighting the cursor digit
-            x_pos = 110
+            x_pos = title_x + max(46, int(self.width * 0.12))
             for i, ch in enumerate(freq_str):
                 if i == cursor_char_idx and blink_on:
                     # draw highlighted (inverted)
                     bbox = font_md.getbbox(ch)
                     ch_w = bbox[2] - bbox[0]
-                    draw.rectangle([x_pos - 1, 41, x_pos + ch_w + 1, 60], fill=BRIGHT)
-                    draw.text((x_pos, 42), ch, fill=BLACK, font=font_md)
+                    draw.rectangle([x_pos - 1, freq_y - 1, x_pos + ch_w + 1, freq_y + 20], fill=BRIGHT)
+                    draw.text((x_pos, freq_y), ch, fill=BLACK, font=font_md)
                 else:
                     color = BRIGHT if i == cursor_char_idx else WHITE
-                    draw.text((x_pos, 42), ch, fill=color, font=font_md)
+                    draw.text((x_pos, freq_y), ch, fill=color, font=font_md)
                 bbox = font_md.getbbox(ch)
                 x_pos += bbox[2] - bbox[0] + 1
         else:
-            draw.text((64, 42), f"FM {self.fm_freq}", fill=DIM, font=font_md)
+            draw.text((title_x, freq_y), f"FM {self.fm_freq}", fill=DIM, font=font_md)
 
         # -- separator --
-        draw.line([(8, 68), (232, 68)], fill=FAINT, width=1)
+        sep1 = int(self.height * 0.28)
+        draw.line([(margin, sep1), (self.width - margin, sep1)], fill=FAINT, width=1)
 
         # -- conf / gate --
-        draw.text((8, 76), "conf", fill=DIM, font=font_sm)
-        draw.text((50, 74), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
-        draw.text((120, 76), "gate", fill=DIM, font=font_sm)
-        draw.text((162, 74), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
+        metrics_y = sep1 + max(8, int(self.height * 0.03))
+        draw.text((margin, metrics_y), "conf", fill=DIM, font=font_sm)
+        draw.text((margin + int(self.width * 0.12), metrics_y - 2), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
+        draw.text((margin + int(self.width * 0.36), metrics_y), "gate", fill=DIM, font=font_sm)
+        draw.text((margin + int(self.width * 0.48), metrics_y - 2), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note (color matches current rainbow hue) --
+        note_y = metrics_y + max(24, int(self.height * 0.085))
         if self.note_name != "--":
-            draw.text((8, 98), self.note_name, fill=self._current_color, font=font_lg)
-            draw.text((60, 100), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
+            draw.text((margin, note_y), self.note_name, fill=self._current_color, font=font_lg)
+            draw.text((margin + int(self.width * 0.14), note_y + 2), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
         else:
-            draw.text((8, 98), "--", fill=DIM, font=font_lg)
+            draw.text((margin, note_y), "--", fill=DIM, font=font_lg)
 
         # -- flashing MUTED indicator (top-right corner) --
         if self.muted:
             blink_on = (int(time.monotonic() * 2) % 2) == 0
             if blink_on:
-                draw.text((180, 8), "MUTED", fill=MUTED_RED, font=font_sm)
+                draw.text((self.width - max(62, int(self.width * 0.18)), margin), "MUTED", fill=MUTED_RED, font=font_sm)
 
         # -- mode --
         mode_color = BRIGHT if self.mode == "GHOST" else WHITE
         if self.muted:
             mode_color = FAINT
-        draw.text((170, 98), self.mode, fill=mode_color, font=font_sm)
+        draw.text((self.width - max(80, int(self.width * 0.22)), note_y + 2), self.mode, fill=mode_color, font=font_sm)
 
         # -- separator (top/bottom half boundary) --
-        draw.line([(8, 120), (232, 120)], fill=FAINT, width=1)
+        draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
         # -- piano roll (bottom half) --
         self._draw_roll(draw, img)
@@ -552,29 +635,29 @@ class GhostDisplay:
     def _draw_roll(self, draw: ImageDraw.Draw, img: Image.Image):
         """Draw the scrolling piano roll in the bottom half."""
         now = time.monotonic()
-        key_h = ROLL_HEIGHT / NUM_KEYS
-        px_per_sec = WIDTH / ROLL_SECONDS
+        key_h = self.roll_height / NUM_KEYS
+        px_per_sec = self.width / ROLL_SECONDS
 
         # dim octave grid lines
         for i in range(NUM_KEYS):
             midi = MIDI_HI - 1 - i
             if midi % 12 == 0:
-                y = ROLL_TOP + int(i * key_h)
-                draw.line([(0, y), (WIDTH, y)], fill=(25, 15, 35), width=1)
+                y = self.roll_top + int(i * key_h)
+                draw.line([(0, y), (self.width, y)], fill=(25, 15, 35), width=1)
 
         # draw completed notes (each has its own stamped color)
         for note in self._roll_notes:
             if note.midi < MIDI_LO or note.midi >= MIDI_HI:
                 continue
 
-            x_start = int(WIDTH - (now - note.start_time) * px_per_sec)
-            x_end = int(WIDTH - (now - note.end_time) * px_per_sec)
+            x_start = int(self.width - (now - note.start_time) * px_per_sec)
+            x_end = int(self.width - (now - note.end_time) * px_per_sec)
 
-            if x_end < 0 or x_start > WIDTH:
+            if x_end < 0 or x_start > self.width:
                 continue
 
             row = MIDI_HI - 1 - note.midi
-            y = ROLL_TOP + int(row * key_h) + 1
+            y = self.roll_top + int(row * key_h) + 1
             h = max(int(key_h) - 2, 1)
 
             color = note.color
@@ -589,14 +672,14 @@ class GhostDisplay:
 
         # draw live note (extends to right edge, uses current live color)
         if self._live_midi > 0 and MIDI_LO <= self._live_midi < MIDI_HI:
-            x_start = int(WIDTH - (now - self._live_start) * px_per_sec)
+            x_start = int(self.width - (now - self._live_start) * px_per_sec)
             x_start = max(0, x_start)
 
             row = MIDI_HI - 1 - self._live_midi
-            y = ROLL_TOP + int(row * key_h) + 1
+            y = self.roll_top + int(row * key_h) + 1
             h = max(int(key_h) - 2, 1)
 
-            draw.rectangle([x_start, y, WIDTH, y + h], fill=self._live_color)
+            draw.rectangle([x_start, y, self.width, y + h], fill=self._live_color)
 
         # prune old notes
         cutoff = now - ROLL_SECONDS * 2

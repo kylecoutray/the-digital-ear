@@ -190,6 +190,9 @@ Full BOM with prices in the [Technical Report](https://docs.google.com/document/
 
 ## Quick Start
 
+For the Raspberry Pi 4 + CUQI/LCDWiki 3.5" display bring-up, use
+[docs/matt-gift-pi4-setup.md](docs/matt-gift-pi4-setup.md).
+
 ### Requirements
 
 Everything from Stage 1, plus:
