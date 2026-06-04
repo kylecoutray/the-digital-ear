@@ -822,29 +822,31 @@ class GhostDisplay:
         if self.active_control == "conf":
             label = "CONF"
             value = self.conf_th
-            lo, hi = 1.0, 25.0
             value_text = f"{value:.1f}"
         elif self.active_control == "gate":
             label = "GATE"
             value = self.rms_th
-            lo, hi = 0.001, 0.1
             value_text = f"{value:.3f}"
         else:
             label = "FREQ"
             value = self.freq_mhz
-            lo, hi = 87.5, 108.0
             value_text = f"{value:.1f}"
 
         draw.text((x0 + pad, y0 + 44), label, fill=DIM, font=font_sm)
         draw.text((x0 + pad, y0 + 66), value_text, fill=BRIGHT, font=font_lg)
 
-        track = (x0 + 42, y0 + 108, x1 - 42, y1 - 16)
-        self._touch_hitboxes.append((f"slider:{self.active_control}", track))
-        draw.rectangle(track, fill=(20, 6, 30), outline=FAINT)
-        t = 0.0 if hi <= lo else (value - lo) / (hi - lo)
-        t = max(0.0, min(1.0, t))
-        knob_y = int(track[3] - t * (track[3] - track[1]))
-        draw.rectangle([track[0] - 10, knob_y - 8, track[2] + 10, knob_y + 8], fill=BRIGHT)
+        gap = 8
+        btn_top = y0 + 112
+        btn_bottom = y1 - 16
+        mid = x0 + ((x1 - x0) // 2)
+        minus_rect = (x0 + pad, btn_top, mid - gap // 2, btn_bottom)
+        plus_rect = (mid + gap // 2, btn_top, x1 - pad, btn_bottom)
+        self._touch_hitboxes.append(("control:minus", minus_rect))
+        self._touch_hitboxes.append(("control:plus", plus_rect))
+        draw.rectangle(minus_rect, fill=(28, 8, 42), outline=FAINT)
+        draw.rectangle(plus_rect, fill=(28, 8, 42), outline=FAINT)
+        self._center_text(draw, "-", minus_rect, font_lg, WHITE)
+        self._center_text(draw, "+", plus_rect, font_lg, WHITE)
 
     @staticmethod
     def _center_text(draw, text: str, rect: tuple[int, int, int, int], font, fill):

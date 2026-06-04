@@ -1114,17 +1114,13 @@ def main():
     edit_cursor = [0]  # 0=tens, 1=ones, 2=tenths
     EDIT_STEPS = [100, 10, 1]  # increment per cursor position (in tenths)
 
-    def apply_slider(control: str, y: int):
-        track_top = lcd.roll_top + 108
-        track_bottom = lcd.height - 16
-        t = 1.0 - ((y - track_top) / max(1, track_bottom - track_top))
-        t = max(0.0, min(1.0, t))
+    def nudge_control(control: str, direction: int):
         if control == "conf":
-            pipeline.conf_th = 1.0 + t * (25.0 - 1.0)
+            pipeline.conf_th = max(1.0, min(25.0, pipeline.conf_th + direction * 0.5))
         elif control == "gate":
-            pipeline.rms_th = 0.001 + t * (0.1 - 0.001)
+            pipeline.rms_th = max(0.001, min(0.1, pipeline.rms_th + direction * 0.002))
         elif control == "freq":
-            mhz = 87.5 + t * (108.0 - 87.5)
+            mhz = max(87.5, min(108.0, (freq_to_tenths(fm.freq) / 10.0) + direction * 0.1))
             edit_tenths[0] = int(round(mhz * 10))
             new_freq = tenths_to_freq(edit_tenths[0])
             lcd.fm_freq = new_freq
@@ -1269,13 +1265,15 @@ def main():
                     print(f"\r  TOUCH {ev_type} x={tx:3d} y={ty:3d} hit={hit}                    ")
                 if hit == "control:back" and ev_type == "down":
                     lcd.active_control = ""
+                elif hit == "control:minus" and ev_type == "down":
+                    nudge_control(lcd.active_control, -1)
+                elif hit == "control:plus" and ev_type == "down":
+                    nudge_control(lcd.active_control, 1)
                 elif hit and hit.startswith("control:") and ev_type == "down":
                     lcd.active_control = hit.split(":", 1)[1]
                 elif hit in {"p", "m", "r", "f"} and ev_type == "down":
                     if not apply_control(hit):
                         break
-                elif lcd.active_control and ev_type in {"down", "drag"}:
-                    apply_slider(lcd.active_control, ty)
 
             lcd.conf_th = pipeline.conf_th
             lcd.rms_th = pipeline.rms_th

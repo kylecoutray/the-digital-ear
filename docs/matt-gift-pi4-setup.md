@@ -101,7 +101,7 @@ git switch matt-gift
 Install system packages:
 
 ```bash
-sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil fonts-dejavu-core libportaudio2
+sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil fonts-dejavu-core libportaudio2 rtl-sdr
 ```
 
 Create the venv:
@@ -227,7 +227,7 @@ The on-screen controls are:
 - `MUTE`: toggles synth output.
 - `GHOST/RADIO`: toggles synthesized melody vs raw radio passthrough.
 - `PRESET`: cycles station presets.
-- `CONF`, `GATE`, `FREQ`: opens a vertical slider; tap `BACK` to return.
+- `CONF`, `GATE`, `FREQ`: opens large `-` / `+` controls; tap `BACK` to return.
 
 For the built-in Raspberry Pi aux/headphone jack:
 
