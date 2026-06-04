@@ -224,11 +224,12 @@ class ST7789Direct:
 class FramebufferRGB565:
     """Linux framebuffer writer for LCD-show SPI displays."""
 
-    def __init__(self, path="/dev/fb1", width=480, height=320, rotation=0):
+    def __init__(self, path="/dev/fb1", width=480, height=320, rotation=0, byte_order="little"):
         self.path = path
         self.width = width
         self.height = height
         self.rotation = rotation
+        self.byte_order = byte_order
         self._fb = None
 
     def begin(self):
@@ -242,7 +243,7 @@ class FramebufferRGB565:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        raw = image_to_rgb565(img)
+        raw = image_to_rgb565(img, byte_order=self.byte_order)
         expected = self.width * self.height * 2
         if len(raw) != expected:
             raise ValueError(f"framebuffer frame is {len(raw)} bytes, expected {expected}")
@@ -256,15 +257,19 @@ class FramebufferRGB565:
             self._fb = None
 
 
-def image_to_rgb565(img: Image.Image) -> bytes:
-    """Convert an RGB Pillow image to big-endian RGB565 bytes."""
+def image_to_rgb565(img: Image.Image, byte_order: str = "big") -> bytes:
+    """Convert an RGB Pillow image to RGB565 bytes."""
     if img.mode != "RGB":
         img = img.convert("RGB")
     arr = np.frombuffer(img.tobytes(), dtype=np.uint8).reshape(-1, 3).astype(np.uint16)
     rgb565 = ((arr[:, 0] & 0xF8) << 8) | ((arr[:, 1] & 0xFC) << 3) | (arr[:, 2] >> 3)
     buf = np.empty(len(rgb565) * 2, dtype=np.uint8)
-    buf[0::2] = (rgb565 >> 8).astype(np.uint8)
-    buf[1::2] = (rgb565 & 0xFF).astype(np.uint8)
+    if byte_order == "little":
+        buf[0::2] = (rgb565 & 0xFF).astype(np.uint8)
+        buf[1::2] = (rgb565 >> 8).astype(np.uint8)
+    else:
+        buf[0::2] = (rgb565 >> 8).astype(np.uint8)
+        buf[1::2] = (rgb565 & 0xFF).astype(np.uint8)
     return buf.tobytes()
 
 
@@ -280,6 +285,7 @@ class GhostDisplay:
         width: int = 240,
         height: int = 240,
         rotation: int = 0,
+        byte_order: str = "little",
     ):
         self._backlight_pct = backlight_pct
         self.backend = backend
@@ -287,6 +293,7 @@ class GhostDisplay:
         self.width = width
         self.height = height
         self.rotation = rotation
+        self.byte_order = byte_order
         self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
         # shared state (written by main thread, read by display thread)
@@ -385,6 +392,7 @@ class GhostDisplay:
                     width=self.width,
                     height=self.height,
                     rotation=self.rotation,
+                    byte_order=self.byte_order,
                 )
                 self._hw.begin()
             except Exception as e:

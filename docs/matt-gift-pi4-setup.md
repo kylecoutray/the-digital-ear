@@ -127,6 +127,7 @@ Do this before starting the full FM/audio pipeline:
   --fbdev /dev/fb1 \
   --display-width 480 \
   --display-height 320 \
+  --display-byte-order little \
   --no-joystick
 ```
 
@@ -146,6 +147,19 @@ journalctl -b | grep -i -E 'fb|spi|ili|lcd'
 ```
 
 Then retry the LCD-show driver install and rotation steps.
+
+If orientation is correct but colors look wrong, try the alternate RGB565 byte order:
+
+```bash
+./venv/bin/python ghost_fm.py \
+  --display-test \
+  --display-backend fbdev \
+  --fbdev /dev/fb1 \
+  --display-width 480 \
+  --display-height 320 \
+  --display-byte-order big \
+  --no-joystick
+```
 
 ## 6. Enable Autostart
 

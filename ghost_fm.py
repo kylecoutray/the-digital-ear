@@ -101,6 +101,12 @@ def add_display_args(parser: argparse.ArgumentParser):
         help="Software rotation for framebuffer output (default: 0)",
     )
     parser.add_argument(
+        "--display-byte-order",
+        choices=["little", "big"],
+        default="little",
+        help="RGB565 byte order for framebuffer output (default: little)",
+    )
+    parser.add_argument(
         "--no-joystick",
         action="store_true",
         help="Disable GPIO joystick/HAT button input",
@@ -132,6 +138,7 @@ def make_display(args) -> GhostDisplay:
         width=args.display_width,
         height=args.display_height,
         rotation=args.display_rotate,
+        byte_order=args.display_byte_order,
     )
 
 
