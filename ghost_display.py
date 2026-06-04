@@ -286,6 +286,7 @@ class GhostDisplay:
         height: int = 240,
         rotation: int = 0,
         byte_order: str = "little",
+        normal_assets: bool = False,
     ):
         self._backlight_pct = backlight_pct
         self.backend = backend
@@ -294,6 +295,7 @@ class GhostDisplay:
         self.height = height
         self.rotation = rotation
         self.byte_order = byte_order
+        self.normal_assets = normal_assets
         self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
         # shared state (written by main thread, read by display thread)
@@ -329,9 +331,11 @@ class GhostDisplay:
         # resolve asset paths
         base = os.path.dirname(os.path.abspath(__file__))
         if ghost_sprite_path is None:
-            ghost_sprite_path = os.path.join(base, "assets", "ghost.png")
+            ghost_name = "ghost_normal.png" if self.normal_assets else "ghost.png"
+            ghost_sprite_path = os.path.join(base, "assets", ghost_name)
         self._ghost_path = ghost_sprite_path
-        self._logo_path = os.path.join(base, "assets", "ghostfm_purple.png")
+        logo_name = "ghostfm_purple_normal.png" if self.normal_assets else "ghostfm_purple.png"
+        self._logo_path = os.path.join(base, "assets", logo_name)
 
         # rainbow hue cycling
         self._hue_cycle_rate = 0.1

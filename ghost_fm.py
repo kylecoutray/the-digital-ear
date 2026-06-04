@@ -107,6 +107,11 @@ def add_display_args(parser: argparse.ArgumentParser):
         help="RGB565 byte order for framebuffer output (default: little)",
     )
     parser.add_argument(
+        "--display-normal-assets",
+        action="store_true",
+        help="Use the less saturated normal GhostFM assets",
+    )
+    parser.add_argument(
         "--no-joystick",
         action="store_true",
         help="Disable GPIO joystick/HAT button input",
@@ -139,6 +144,7 @@ def make_display(args) -> GhostDisplay:
         height=args.display_height,
         rotation=args.display_rotate,
         byte_order=args.display_byte_order,
+        normal_assets=args.display_normal_assets or args.display_backend == "fbdev",
     )
 
 

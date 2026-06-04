@@ -128,6 +128,7 @@ Do this before starting the full FM/audio pipeline:
   --display-width 480 \
   --display-height 320 \
   --display-byte-order little \
+  --display-normal-assets \
   --no-joystick
 ```
 
@@ -158,6 +159,7 @@ If orientation is correct but colors look wrong, try the alternate RGB565 byte o
   --display-width 480 \
   --display-height 320 \
   --display-byte-order big \
+  --display-normal-assets \
   --no-joystick
 ```
 
