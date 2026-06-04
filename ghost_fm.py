@@ -112,6 +112,18 @@ def add_display_args(parser: argparse.ArgumentParser):
         help="Use the less saturated normal GhostFM assets",
     )
     parser.add_argument(
+        "--display-ui-scale",
+        type=float,
+        default=None,
+        help="Scale factor for display text (default: 2.0 on fbdev, 1.0 otherwise)",
+    )
+    parser.add_argument(
+        "--display-asset-scale",
+        type=float,
+        default=None,
+        help="Scale factor for display logos/sprites (default: 1.5 on fbdev, 1.0 otherwise)",
+    )
+    parser.add_argument(
         "--no-joystick",
         action="store_true",
         help="Disable GPIO joystick/HAT button input",
@@ -136,6 +148,13 @@ class VizFrame:
 
 
 def make_display(args) -> GhostDisplay:
+    ui_scale = args.display_ui_scale
+    if ui_scale is None:
+        ui_scale = 2.0 if args.display_backend == "fbdev" else 1.0
+    asset_scale = args.display_asset_scale
+    if asset_scale is None:
+        asset_scale = 1.5 if args.display_backend == "fbdev" else 1.0
+
     return GhostDisplay(
         backlight_pct=args.brightness,
         backend=args.display_backend,
@@ -145,6 +164,8 @@ def make_display(args) -> GhostDisplay:
         rotation=args.display_rotate,
         byte_order=args.display_byte_order,
         normal_assets=args.display_normal_assets or args.display_backend == "fbdev",
+        ui_scale=ui_scale,
+        asset_scale=asset_scale,
     )
 
 

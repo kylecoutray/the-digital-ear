@@ -287,6 +287,8 @@ class GhostDisplay:
         rotation: int = 0,
         byte_order: str = "little",
         normal_assets: bool = False,
+        ui_scale: float = 1.0,
+        asset_scale: float = 1.0,
     ):
         self._backlight_pct = backlight_pct
         self.backend = backend
@@ -296,7 +298,9 @@ class GhostDisplay:
         self.rotation = rotation
         self.byte_order = byte_order
         self.normal_assets = normal_assets
-        self.roll_top = int(self.height * 0.52)
+        self.ui_scale = ui_scale
+        self.asset_scale = asset_scale
+        self.roll_top = int(self.height * (0.72 if self.ui_scale > 1.0 else 0.52))
         self.roll_height = self.height - self.roll_top
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
@@ -412,7 +416,7 @@ class GhostDisplay:
         # load ghost sprite (normal + horizontally flipped)
         try:
             raw = Image.open(self._ghost_path).convert("RGBA")
-            ghost_size = max(48, int(min(self.width, self.height) * 0.18))
+            ghost_size = max(24, int(48 * self.asset_scale))
             self._ghost_img = raw.resize((ghost_size, ghost_size), Image.NEAREST)
             self._ghost_img_flipped = ImageOps.mirror(self._ghost_img)
         except Exception as e:
@@ -423,11 +427,11 @@ class GhostDisplay:
         # load logo (small for active UI)
         try:
             logo_raw = Image.open(self._logo_path).convert("RGBA")
-            logo_h = max(28, int(self.height * 0.09))
+            logo_h = max(16, int(28 * self.asset_scale))
             logo_w = int(logo_raw.width * logo_h / logo_raw.height)
             self._logo_img = logo_raw.resize((logo_w, logo_h), Image.LANCZOS)
             # larger logo for idle screen (centered)
-            idle_h = max(40, int(self.height * 0.13))
+            idle_h = max(24, int(40 * self.asset_scale))
             idle_w = int(logo_raw.width * idle_h / logo_raw.height)
             self._logo_idle_img = logo_raw.resize((idle_w, idle_h), Image.LANCZOS)
         except Exception as e:
@@ -484,7 +488,10 @@ class GhostDisplay:
         else:
             draw = ImageDraw.Draw(img)
             try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", max(24, int(self.height * 0.08)))
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+                    max(12, int(24 * self.ui_scale)),
+                )
             except Exception:
                 font = ImageFont.load_default()
             draw.text((self.width * 0.25, self.height * 0.45), "GhostFM", fill=PURPLE, font=font)
@@ -535,20 +542,25 @@ class GhostDisplay:
         draw = ImageDraw.Draw(img)
 
         try:
-            font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", max(20, int(self.height * 0.072)))
-            font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", max(16, int(self.height * 0.055)))
-            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", max(13, int(self.height * 0.044)))
+            font_lg_size = max(10, int(20 * self.ui_scale))
+            font_md_size = max(8, int(16 * self.ui_scale))
+            font_sm_size = max(7, int(13 * self.ui_scale))
+            font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", font_lg_size)
+            font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_md_size)
+            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_sm_size)
         except Exception:
             font_lg = ImageFont.load_default()
             font_md = font_lg
             font_sm = font_lg
+            font_lg_size = font_md_size = font_sm_size = 12
 
         # -- ghost sprite (bobbing animation) --
         bob_offset = int(3 * math.sin(self._frame_count * 0.4))
-        margin = max(8, int(self.width * 0.025))
+        margin = max(8, int(8 * self.ui_scale))
         ghost_x = margin
-        ghost_y = max(8, int(self.height * 0.04)) + bob_offset
+        ghost_y = max(8, int(10 * self.asset_scale)) + bob_offset
 
+        ghost_w = ghost_h = max(48, int(48 * self.asset_scale))
         if self._ghost_img:
             ghost_w, ghost_h = self._ghost_img.size
             ghost_layer = Image.new("RGB", (self.width, self.height), BLACK)
@@ -558,10 +570,11 @@ class GhostDisplay:
                       (ghost_x, ghost_y), mask)
 
         # -- title (logo or text fallback) --
-        title_x = margin + max(62, int(min(self.width, self.height) * 0.24))
+        title_x = margin + ghost_w + max(8, int(8 * self.ui_scale))
+        logo_y = max(8, int(8 * self.ui_scale))
+        logo_h = font_lg_size
         if self._logo_img:
             logo_x = title_x
-            logo_y = max(10, int(self.height * 0.04))
             logo_layer = Image.new("RGB", (self.width, self.height), BLACK)
             logo_layer.paste(self._logo_img, (logo_x, logo_y), self._logo_img)
             logo_w, logo_h = self._logo_img.size
@@ -569,10 +582,11 @@ class GhostDisplay:
             img.paste(logo_layer.crop((logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)),
                       (logo_x, logo_y), logo_mask)
         else:
-            draw.text((title_x, max(10, int(self.height * 0.04))), "GhostFM", fill=PURPLE, font=font_lg)
+            draw.text((title_x, logo_y), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency (with edit mode support) --
-        freq_y = max(42, int(self.height * 0.14))
+        row_gap = max(6, int(6 * self.ui_scale))
+        freq_y = logo_y + logo_h + row_gap
         if self.edit_mode:
             # show "EDIT" label + frequency with flashing cursor digit
             draw.text((title_x, freq_y), "EDIT ", fill=MUTED_RED, font=font_md)
@@ -595,7 +609,7 @@ class GhostDisplay:
                     # draw highlighted (inverted)
                     bbox = font_md.getbbox(ch)
                     ch_w = bbox[2] - bbox[0]
-                    draw.rectangle([x_pos - 1, freq_y - 1, x_pos + ch_w + 1, freq_y + 20], fill=BRIGHT)
+                    draw.rectangle([x_pos - 1, freq_y - 1, x_pos + ch_w + 1, freq_y + font_md_size + 4], fill=BRIGHT)
                     draw.text((x_pos, freq_y), ch, fill=BLACK, font=font_md)
                 else:
                     color = BRIGHT if i == cursor_char_idx else WHITE
@@ -606,21 +620,21 @@ class GhostDisplay:
             draw.text((title_x, freq_y), f"FM {self.fm_freq}", fill=DIM, font=font_md)
 
         # -- separator --
-        sep1 = int(self.height * 0.28)
+        sep1 = freq_y + font_md_size + max(10, int(10 * self.ui_scale))
         draw.line([(margin, sep1), (self.width - margin, sep1)], fill=FAINT, width=1)
 
         # -- conf / gate --
-        metrics_y = sep1 + max(8, int(self.height * 0.03))
+        metrics_y = sep1 + max(8, int(8 * self.ui_scale))
         draw.text((margin, metrics_y), "conf", fill=DIM, font=font_sm)
-        draw.text((margin + int(self.width * 0.12), metrics_y - 2), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
-        draw.text((margin + int(self.width * 0.36), metrics_y), "gate", fill=DIM, font=font_sm)
-        draw.text((margin + int(self.width * 0.48), metrics_y - 2), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
+        draw.text((margin + int(self.width * 0.16), metrics_y - 2), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
+        draw.text((margin + int(self.width * 0.40), metrics_y), "gate", fill=DIM, font=font_sm)
+        draw.text((margin + int(self.width * 0.54), metrics_y - 2), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note (color matches current rainbow hue) --
-        note_y = metrics_y + max(24, int(self.height * 0.085))
+        note_y = metrics_y + font_md_size + max(10, int(10 * self.ui_scale))
         if self.note_name != "--":
             draw.text((margin, note_y), self.note_name, fill=self._current_color, font=font_lg)
-            draw.text((margin + int(self.width * 0.14), note_y + 2), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
+            draw.text((margin + int(self.width * 0.18), note_y + 4), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
         else:
             draw.text((margin, note_y), "--", fill=DIM, font=font_lg)
 
@@ -637,6 +651,10 @@ class GhostDisplay:
         draw.text((self.width - max(80, int(self.width * 0.22)), note_y + 2), self.mode, fill=mode_color, font=font_sm)
 
         # -- separator (top/bottom half boundary) --
+        min_roll_height = max(52, int(34 * self.ui_scale))
+        desired_roll_top = note_y + font_lg_size + max(8, int(8 * self.ui_scale))
+        self.roll_top = min(max(self.roll_top, desired_roll_top), self.height - min_roll_height)
+        self.roll_height = self.height - self.roll_top
         draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
         # -- piano roll (bottom half) --
