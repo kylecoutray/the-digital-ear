@@ -101,7 +101,7 @@ git switch matt-gift
 Install system packages:
 
 ```bash
-sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil
+sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil fonts-dejavu-core
 ```
 
 Create the venv:

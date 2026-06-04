@@ -59,6 +59,19 @@ PIN_DC = 25
 PIN_RST = 27
 PIN_BL = 24
 
+FONT_REGULAR_CANDIDATES = [
+    "DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+]
+FONT_BOLD_CANDIDATES = [
+    "DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+]
+
 
 def _lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
     """Linearly interpolate between two RGB tuples."""
@@ -100,6 +113,20 @@ def _hsv_to_rgb(h: float, s: float, v: float) -> tuple:
     if i == 3: return (p, q, v_int)
     if i == 4: return (t_val, p, v_int)
     return (v_int, p, q)
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    """Load a scalable font, falling back to Pillow's size-aware default."""
+    candidates = FONT_BOLD_CANDIDATES if bold else FONT_REGULAR_CANDIDATES
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 @dataclass
@@ -487,13 +514,7 @@ class GhostDisplay:
                       (logo_x, logo_y), logo_mask)
         else:
             draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-                    max(12, int(24 * self.ui_scale)),
-                )
-            except Exception:
-                font = ImageFont.load_default()
+            font = _load_font(max(12, int(24 * self.ui_scale)), bold=True)
             draw.text((self.width * 0.25, self.height * 0.45), "GhostFM", fill=PURPLE, font=font)
 
         # DVD-bounce the ghost
@@ -541,18 +562,12 @@ class GhostDisplay:
         img = Image.new("RGB", (self.width, self.height), BLACK)
         draw = ImageDraw.Draw(img)
 
-        try:
-            font_lg_size = max(10, int(20 * self.ui_scale))
-            font_md_size = max(8, int(16 * self.ui_scale))
-            font_sm_size = max(7, int(13 * self.ui_scale))
-            font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", font_lg_size)
-            font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_md_size)
-            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_sm_size)
-        except Exception:
-            font_lg = ImageFont.load_default()
-            font_md = font_lg
-            font_sm = font_lg
-            font_lg_size = font_md_size = font_sm_size = 12
+        font_lg_size = max(10, int(20 * self.ui_scale))
+        font_md_size = max(8, int(16 * self.ui_scale))
+        font_sm_size = max(7, int(13 * self.ui_scale))
+        font_lg = _load_font(font_lg_size, bold=True)
+        font_md = _load_font(font_md_size)
+        font_sm = _load_font(font_sm_size)
 
         # -- ghost sprite (bobbing animation) --
         bob_offset = int(3 * math.sin(self._frame_count * 0.4))
