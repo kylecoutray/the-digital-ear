@@ -797,6 +797,10 @@ class TouchReader:
         self._y = 0
         self._down = False
         self._last_down = False
+        self._saw_touch_key = False
+        self._abs_dirty = False
+        self._coord_active = False
+        self._last_coord_emit = 0.0
         self._xmin = 0
         self._xmax = max(1, width - 1)
         self._ymin = 0
@@ -848,20 +852,32 @@ class TouchReader:
             if ev_type == self.EV_ABS:
                 if code == self.ABS_X:
                     self._x = value
+                    self._abs_dirty = True
                 elif code == self.ABS_Y:
                     self._y = value
+                    self._abs_dirty = True
                 elif code == self.ABS_PRESSURE:
                     self._down = value > 0
+                    self._saw_touch_key = True
             elif ev_type == self.EV_KEY and code == self.BTN_TOUCH:
                 self._down = value != 0
+                self._saw_touch_key = True
             elif ev_type == self.EV_SYN:
                 x, y = self._map_xy(self._x, self._y)
-                if self._down and not self._last_down:
+                if self._saw_touch_key and self._down and not self._last_down:
                     event = ("down", x, y)
-                elif self._down:
+                elif self._saw_touch_key and self._down:
                     event = ("drag", x, y)
-                elif self._last_down:
+                elif self._saw_touch_key and self._last_down:
                     event = ("up", x, y)
+                elif self._abs_dirty:
+                    now = time.monotonic()
+                    if now - self._last_coord_emit >= 0.08:
+                        event_type = "drag" if self._coord_active else "down"
+                        event = (event_type, x, y)
+                        self._coord_active = True
+                        self._last_coord_emit = now
+                    self._abs_dirty = False
                 self._last_down = self._down
         return event
 
@@ -1249,7 +1265,7 @@ def main():
             if touch_event:
                 ev_type, tx, ty = touch_event
                 hit = lcd.hit_test(tx, ty)
-                if args.touch_debug and ev_type == "down":
+                if args.touch_debug and ev_type in {"down", "drag"}:
                     print(f"\r  TOUCH {ev_type} x={tx:3d} y={ty:3d} hit={hit}                    ")
                 if hit == "control:back" and ev_type == "down":
                     lcd.active_control = ""

@@ -219,6 +219,8 @@ Expected mapped corners are roughly:
 - bottom-left: `x=0 y=319`
 - bottom-right: `x=479 y=319`
 
+This display uses a resistive ADS7846/XPT2046-style touch panel, not a phone-style capacitive panel. Use the stylus or a firm fingernail press while testing. If debug prints only appear after unusually hard pressure, verify the screen is fully seated on the GPIO header and that nothing in the case is flexing the panel.
+
 The on-screen controls are:
 
 - `PLAY/PAUSE`: starts or stops FM capture.
