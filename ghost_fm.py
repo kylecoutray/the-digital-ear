@@ -171,6 +171,11 @@ def add_display_args(parser: argparse.ArgumentParser):
         action="store_true",
         help="Invert touchscreen Y before mapping to the display",
     )
+    parser.add_argument(
+        "--touch-debug",
+        action="store_true",
+        help="Print mapped touchscreen coordinates and hit targets",
+    )
 
 
 @dataclass
@@ -778,6 +783,7 @@ class TouchReader:
         swap_xy: bool = False,
         invert_x: bool = False,
         invert_y: bool = False,
+        debug: bool = False,
     ):
         self.device = device
         self.width = width
@@ -785,6 +791,7 @@ class TouchReader:
         self.swap_xy = swap_xy
         self.invert_x = invert_x
         self.invert_y = invert_y
+        self.debug = debug
         self._fd = None
         self._x = 0
         self._y = 0
@@ -806,6 +813,12 @@ class TouchReader:
             self._xmin, self._xmax = self._abs_range(self.ABS_X, self._xmax)
             self._ymin, self._ymax = self._abs_range(self.ABS_Y, self._ymax)
             print(f"  Touch: using {path}")
+            if self.debug:
+                print(
+                    f"  Touch ranges: x={self._xmin}..{self._xmax} "
+                    f"y={self._ymin}..{self._ymax} "
+                    f"swap={self.swap_xy} invert_x={self.invert_x} invert_y={self.invert_y}"
+                )
         except Exception as e:
             print(f"  Touch not available ({path}): {e}")
             self._fd = None
@@ -1178,6 +1191,7 @@ def main():
         swap_xy=args.touch_swap_xy,
         invert_x=args.touch_invert_x,
         invert_y=args.touch_invert_y,
+        debug=args.touch_debug,
     )
     if args.touch_ui or args.display_backend == "fbdev":
         touch.start()
@@ -1235,6 +1249,8 @@ def main():
             if touch_event:
                 ev_type, tx, ty = touch_event
                 hit = lcd.hit_test(tx, ty)
+                if args.touch_debug and ev_type == "down":
+                    print(f"\r  TOUCH {ev_type} x={tx:3d} y={ty:3d} hit={hit}                    ")
                 if hit == "control:back" and ev_type == "down":
                     lcd.active_control = ""
                 elif hit and hit.startswith("control:") and ev_type == "down":

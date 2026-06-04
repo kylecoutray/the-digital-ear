@@ -194,6 +194,31 @@ GhostFM auto-detects common touchscreen names. If touch coordinates are flipped,
 --touch-invert-y
 ```
 
+For calibration, run with debug enabled and tap the four corners plus the right-side buttons:
+
+```bash
+./venv/bin/python ghost_fm.py \
+  --display-backend fbdev \
+  --fbdev /dev/fb1 \
+  --display-width 480 \
+  --display-height 320 \
+  --display-byte-order little \
+  --display-normal-assets \
+  --display-ui-scale 1.5 \
+  --display-asset-scale 1.5 \
+  --touch-ui \
+  --touch-device /dev/input/event0 \
+  --touch-debug \
+  --no-joystick
+```
+
+Expected mapped corners are roughly:
+
+- top-left: `x=0 y=0`
+- top-right: `x=479 y=0`
+- bottom-left: `x=0 y=319`
+- bottom-right: `x=479 y=319`
+
 The on-screen controls are:
 
 - `PLAY/PAUSE`: starts or stops FM capture.

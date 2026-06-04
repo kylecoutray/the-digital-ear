@@ -329,9 +329,10 @@ class GhostDisplay:
         self.ui_scale = ui_scale
         self.asset_scale = asset_scale
         self.touch_ui = touch_ui
+        self.control_panel_width = 150 if self.touch_ui and self.width >= 400 else 0
         self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
-        self.roll_right = self.width
+        self.roll_right = self.width - self.control_panel_width
         self._touch_hitboxes: list[tuple[str, tuple[int, int, int, int]]] = []
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
@@ -690,7 +691,7 @@ class GhostDisplay:
         desired_roll_top = note_y + font_lg_size + tight_gap
         self.roll_top = min(max(int(self.height * 0.52), desired_roll_top), self.height - min_roll_height)
         self.roll_height = self.height - self.roll_top
-        self.roll_right = self.width - (150 if self.touch_ui and self.width >= 400 else 0)
+        self.roll_right = self.width - self.control_panel_width
         draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
         # -- piano roll (bottom half) --
@@ -768,9 +769,9 @@ class GhostDisplay:
             self._roll_notes.popleft()
 
     def _draw_touch_controls(self, draw: ImageDraw.Draw, font_sm, font_md, font_lg):
-        panel_w = 150
+        panel_w = self.control_panel_width or 150
         x0 = self.width - panel_w
-        y0 = self.roll_top
+        y0 = 0
         x1 = self.width - 1
         y1 = self.height - 1
         self._touch_hitboxes = []
