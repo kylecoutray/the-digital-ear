@@ -115,7 +115,7 @@ def add_display_args(parser: argparse.ArgumentParser):
         "--display-ui-scale",
         type=float,
         default=None,
-        help="Scale factor for display text (default: 2.0 on fbdev, 1.0 otherwise)",
+        help="Scale factor for display text (default: 2.5 on fbdev, 1.0 otherwise)",
     )
     parser.add_argument(
         "--display-asset-scale",
@@ -150,7 +150,7 @@ class VizFrame:
 def make_display(args) -> GhostDisplay:
     ui_scale = args.display_ui_scale
     if ui_scale is None:
-        ui_scale = 2.0 if args.display_backend == "fbdev" else 1.0
+        ui_scale = 2.5 if args.display_backend == "fbdev" else 1.0
     asset_scale = args.display_asset_scale
     if asset_scale is None:
         asset_scale = 1.5 if args.display_backend == "fbdev" else 1.0

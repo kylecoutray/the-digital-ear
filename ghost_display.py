@@ -300,7 +300,7 @@ class GhostDisplay:
         self.normal_assets = normal_assets
         self.ui_scale = ui_scale
         self.asset_scale = asset_scale
-        self.roll_top = int(self.height * (0.72 if self.ui_scale > 1.0 else 0.52))
+        self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
@@ -556,7 +556,7 @@ class GhostDisplay:
 
         # -- ghost sprite (bobbing animation) --
         bob_offset = int(3 * math.sin(self._frame_count * 0.4))
-        margin = max(8, int(8 * self.ui_scale))
+        margin = max(8, int(8 * self.asset_scale))
         ghost_x = margin
         ghost_y = max(8, int(10 * self.asset_scale)) + bob_offset
 
@@ -570,8 +570,9 @@ class GhostDisplay:
                       (ghost_x, ghost_y), mask)
 
         # -- title (logo or text fallback) --
-        title_x = margin + ghost_w + max(8, int(8 * self.ui_scale))
-        logo_y = max(8, int(8 * self.ui_scale))
+        tight_gap = max(6, int(4 * self.ui_scale))
+        title_x = margin + ghost_w + tight_gap
+        logo_y = max(8, int(8 * self.asset_scale))
         logo_h = font_lg_size
         if self._logo_img:
             logo_x = title_x
@@ -585,7 +586,7 @@ class GhostDisplay:
             draw.text((title_x, logo_y), "GhostFM", fill=PURPLE, font=font_lg)
 
         # -- FM frequency (with edit mode support) --
-        row_gap = max(6, int(6 * self.ui_scale))
+        row_gap = tight_gap
         freq_y = logo_y + logo_h + row_gap
         if self.edit_mode:
             # show "EDIT" label + frequency with flashing cursor digit
@@ -620,18 +621,18 @@ class GhostDisplay:
             draw.text((title_x, freq_y), f"FM {self.fm_freq}", fill=DIM, font=font_md)
 
         # -- separator --
-        sep1 = freq_y + font_md_size + max(10, int(10 * self.ui_scale))
+        sep1 = freq_y + font_md_size + tight_gap
         draw.line([(margin, sep1), (self.width - margin, sep1)], fill=FAINT, width=1)
 
         # -- conf / gate --
-        metrics_y = sep1 + max(8, int(8 * self.ui_scale))
+        metrics_y = sep1 + tight_gap
         draw.text((margin, metrics_y), "conf", fill=DIM, font=font_sm)
         draw.text((margin + int(self.width * 0.16), metrics_y - 2), f"{self.conf_th:.1f}", fill=BRIGHT, font=font_md)
         draw.text((margin + int(self.width * 0.40), metrics_y), "gate", fill=DIM, font=font_sm)
         draw.text((margin + int(self.width * 0.54), metrics_y - 2), f"{self.rms_th:.3f}", fill=BRIGHT, font=font_md)
 
         # -- current note (color matches current rainbow hue) --
-        note_y = metrics_y + font_md_size + max(10, int(10 * self.ui_scale))
+        note_y = metrics_y + font_md_size + tight_gap
         if self.note_name != "--":
             draw.text((margin, note_y), self.note_name, fill=self._current_color, font=font_lg)
             draw.text((margin + int(self.width * 0.18), note_y + 4), f"{self.freq_hz:.1f} Hz", fill=DIM, font=font_sm)
@@ -652,8 +653,8 @@ class GhostDisplay:
 
         # -- separator (top/bottom half boundary) --
         min_roll_height = max(52, int(34 * self.ui_scale))
-        desired_roll_top = note_y + font_lg_size + max(8, int(8 * self.ui_scale))
-        self.roll_top = min(max(self.roll_top, desired_roll_top), self.height - min_roll_height)
+        desired_roll_top = note_y + font_lg_size + tight_gap
+        self.roll_top = min(max(int(self.height * 0.52), desired_roll_top), self.height - min_roll_height)
         self.roll_height = self.height - self.roll_top
         draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
