@@ -316,6 +316,7 @@ class GhostDisplay:
         normal_assets: bool = False,
         ui_scale: float = 1.0,
         asset_scale: float = 1.0,
+        touch_ui: bool = False,
     ):
         self._backlight_pct = backlight_pct
         self.backend = backend
@@ -327,8 +328,11 @@ class GhostDisplay:
         self.normal_assets = normal_assets
         self.ui_scale = ui_scale
         self.asset_scale = asset_scale
+        self.touch_ui = touch_ui
         self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
+        self.roll_right = self.width
+        self._touch_hitboxes: list[tuple[str, tuple[int, int, int, int]]] = []
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
         self.rms_th: float = 0.003
@@ -343,6 +347,8 @@ class GhostDisplay:
         self.edit_mode: bool = False
         self.edit_freq_str: str = ""   # e.g. "89.5" (no M suffix)
         self.edit_cursor: int = 0      # 0=tens, 1=ones, 2=tenths
+        self.active_control: str = ""
+        self.freq_mhz: float = 89.9
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -380,6 +386,12 @@ class GhostDisplay:
         self._bounce_vx: float = 1.5   # pixels per frame
         self._bounce_vy: float = 1.0
         self._bounce_dir_right: bool = True  # for horizontal flip
+
+    def hit_test(self, x: int, y: int) -> Optional[str]:
+        for name, (x0, y0, x1, y1) in reversed(self._touch_hitboxes):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return name
+        return None
 
     def _get_hue_color(self) -> tuple:
         elapsed = time.monotonic() - self._start_time
@@ -554,6 +566,13 @@ class GhostDisplay:
             img.paste(ghost_layer.crop((gx, gy, gx + ghost_w, gy + ghost_h)),
                       (gx, gy), mask)
 
+        if self.touch_ui:
+            draw = ImageDraw.Draw(img)
+            font_lg = _load_font(max(10, int(20 * self.ui_scale)), bold=True)
+            font_md = _load_font(max(8, int(16 * self.ui_scale)))
+            font_sm = _load_font(max(7, int(13 * self.ui_scale)))
+            self._draw_touch_controls(draw, font_sm, font_md, font_lg)
+
         return img
 
     # ---- ACTIVE MODE ----
@@ -671,10 +690,13 @@ class GhostDisplay:
         desired_roll_top = note_y + font_lg_size + tight_gap
         self.roll_top = min(max(int(self.height * 0.52), desired_roll_top), self.height - min_roll_height)
         self.roll_height = self.height - self.roll_top
+        self.roll_right = self.width - (150 if self.touch_ui and self.width >= 400 else 0)
         draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
         # -- piano roll (bottom half) --
         self._draw_roll(draw, img)
+        if self.touch_ui:
+            self._draw_touch_controls(draw, font_sm, font_md, font_lg)
 
         return img
 
@@ -682,9 +704,10 @@ class GhostDisplay:
         """Draw the scrolling piano roll in the bottom half."""
         now = time.monotonic()
         roll_bottom = self.height - 1
-        px_per_sec = self.width / ROLL_SECONDS
+        roll_right = max(1, self.roll_right)
+        px_per_sec = roll_right / ROLL_SECONDS
 
-        draw.rectangle([0, self.roll_top, self.width, roll_bottom], fill=(5, 2, 8))
+        draw.rectangle([0, self.roll_top, roll_right - 1, roll_bottom], fill=(5, 2, 8))
 
         def row_bounds(row: int) -> tuple[int, int]:
             y0 = self.roll_top + int(row * self.roll_height / NUM_KEYS)
@@ -696,18 +719,18 @@ class GhostDisplay:
             midi = MIDI_HI - 1 - i
             if midi % 12 == 0:
                 y, _ = row_bounds(i)
-                draw.line([(0, y), (self.width, y)], fill=(25, 15, 35), width=1)
-        draw.line([(0, roll_bottom), (self.width, roll_bottom)], fill=FAINT, width=1)
+                draw.line([(0, y), (roll_right - 1, y)], fill=(25, 15, 35), width=1)
+        draw.line([(0, roll_bottom), (roll_right - 1, roll_bottom)], fill=FAINT, width=1)
 
         # draw completed notes (each has its own stamped color)
         for note in self._roll_notes:
             if note.midi < MIDI_LO or note.midi >= MIDI_HI:
                 continue
 
-            x_start = int(self.width - (now - note.start_time) * px_per_sec)
-            x_end = int(self.width - (now - note.end_time) * px_per_sec)
+            x_start = int(roll_right - (now - note.start_time) * px_per_sec)
+            x_end = int(roll_right - (now - note.end_time) * px_per_sec)
 
-            if x_end < 0 or x_start > self.width:
+            if x_end < 0 or x_start > roll_right:
                 continue
 
             row = MIDI_HI - 1 - note.midi
@@ -728,7 +751,7 @@ class GhostDisplay:
 
         # draw live note (extends to right edge, uses current live color)
         if self._live_midi > 0 and MIDI_LO <= self._live_midi < MIDI_HI:
-            x_start = int(self.width - (now - self._live_start) * px_per_sec)
+            x_start = int(roll_right - (now - self._live_start) * px_per_sec)
             x_start = max(0, x_start)
 
             row = MIDI_HI - 1 - self._live_midi
@@ -737,12 +760,99 @@ class GhostDisplay:
                 y0 += 1
                 y1 -= 1
 
-            draw.rectangle([x_start, y0, self.width, y1], fill=self._live_color)
+            draw.rectangle([x_start, y0, roll_right - 1, y1], fill=self._live_color)
 
         # prune old notes
         cutoff = now - ROLL_SECONDS * 2
         while self._roll_notes and self._roll_notes[0].end_time < cutoff:
             self._roll_notes.popleft()
+
+    def _draw_touch_controls(self, draw: ImageDraw.Draw, font_sm, font_md, font_lg):
+        panel_w = 150
+        x0 = self.width - panel_w
+        y0 = self.roll_top
+        x1 = self.width - 1
+        y1 = self.height - 1
+        self._touch_hitboxes = []
+
+        draw.rectangle([x0, y0, x1, y1], fill=(12, 4, 18))
+        draw.line([(x0, y0), (x0, y1)], fill=FAINT, width=1)
+
+        if self.active_control:
+            self._draw_slider_control(draw, x0, y0, x1, y1, font_sm, font_md, font_lg)
+            return
+
+        labels = [
+            ("p", "PLAY" if self.paused else "PAUSE"),
+            ("m", "UNMUTE" if self.muted else "MUTE"),
+            ("r", self.mode),
+            ("f", "PRESET"),
+            ("control:conf", "CONF"),
+            ("control:gate", "GATE"),
+            ("control:freq", "FREQ"),
+        ]
+        pad = 6
+        cols = 2
+        rows = 4
+        btn_w = int((x1 - x0 - pad * (cols + 1)) / cols)
+        btn_h = int((y1 - y0 - pad * (rows + 1)) / rows)
+        for idx, (name, label) in enumerate(labels):
+            col = idx % cols
+            row = idx // cols
+            bx0 = x0 + pad + col * (btn_w + pad)
+            by0 = y0 + pad + row * (btn_h + pad)
+            rect = (bx0, by0, bx0 + btn_w, by0 + btn_h)
+            self._touch_hitboxes.append((name, rect))
+            fill = (28, 8, 42)
+            if name == "m" and self.muted:
+                fill = (70, 8, 18)
+            elif name == "r" and self.mode == "RADIO":
+                fill = (24, 38, 60)
+            draw.rectangle(rect, fill=fill, outline=FAINT)
+            self._center_text(draw, label, rect, font_sm, WHITE)
+
+    def _draw_slider_control(self, draw, x0, y0, x1, y1, font_sm, font_md, font_lg):
+        pad = 8
+        back_rect = (x0 + pad, y0 + pad, x1 - pad, y0 + 34)
+        self._touch_hitboxes.append(("control:back", back_rect))
+        draw.rectangle(back_rect, fill=(28, 8, 42), outline=FAINT)
+        self._center_text(draw, "BACK", back_rect, font_sm, WHITE)
+
+        if self.active_control == "conf":
+            label = "CONF"
+            value = self.conf_th
+            lo, hi = 1.0, 25.0
+            value_text = f"{value:.1f}"
+        elif self.active_control == "gate":
+            label = "GATE"
+            value = self.rms_th
+            lo, hi = 0.001, 0.1
+            value_text = f"{value:.3f}"
+        else:
+            label = "FREQ"
+            value = self.freq_mhz
+            lo, hi = 87.5, 108.0
+            value_text = f"{value:.1f}"
+
+        draw.text((x0 + pad, y0 + 44), label, fill=DIM, font=font_sm)
+        draw.text((x0 + pad, y0 + 66), value_text, fill=BRIGHT, font=font_lg)
+
+        track = (x0 + 42, y0 + 108, x1 - 42, y1 - 16)
+        self._touch_hitboxes.append((f"slider:{self.active_control}", track))
+        draw.rectangle(track, fill=(20, 6, 30), outline=FAINT)
+        t = 0.0 if hi <= lo else (value - lo) / (hi - lo)
+        t = max(0.0, min(1.0, t))
+        knob_y = int(track[3] - t * (track[3] - track[1]))
+        draw.rectangle([track[0] - 10, knob_y - 8, track[2] + 10, knob_y + 8], fill=BRIGHT)
+
+    @staticmethod
+    def _center_text(draw, text: str, rect: tuple[int, int, int, int], font, fill):
+        bbox = font.getbbox(text)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = rect[0] + ((rect[2] - rect[0] - tw) // 2)
+        y = rect[1] + ((rect[3] - rect[1] - th) // 2) - bbox[1]
+        draw.text((x, y), text, fill=fill, font=font)
 
     @staticmethod
     def _make_fallback_ghost() -> Image.Image:

@@ -20,11 +20,14 @@ Interactive controls (while running):
 from __future__ import annotations
 
 import argparse
+import glob
+import fcntl
 import math
 import os
 import queue
 import select
 import signal
+import struct
 import subprocess
 import sys
 import termios
@@ -63,6 +66,16 @@ def load_sounddevice():
             "sounddevice could not load PortAudio. Install it with: "
             "sudo apt install -y libportaudio2"
         ) from e
+
+
+def resolve_output_device(sd, device_id: Optional[int], name_substring: Optional[str]) -> Optional[int]:
+    if device_id is not None or not name_substring:
+        return device_id
+    needle = name_substring.lower()
+    for idx, dev in enumerate(sd.query_devices()):
+        if dev.get("max_output_channels", 0) > 0 and needle in dev.get("name", "").lower():
+            return idx
+    raise RuntimeError(f"No audio output device contains {name_substring!r}. Run --list-devices.")
 
 
 def midi_to_name(m: int) -> str:
@@ -133,6 +146,31 @@ def add_display_args(parser: argparse.ArgumentParser):
         action="store_true",
         help="Run an animated display test without SDR/audio/pipeline startup",
     )
+    parser.add_argument(
+        "--touch-ui",
+        action="store_true",
+        help="Show touchscreen controls and read Linux touch input events",
+    )
+    parser.add_argument(
+        "--touch-device",
+        default="auto",
+        help="Touch input event device path, or auto (default: auto)",
+    )
+    parser.add_argument(
+        "--touch-swap-xy",
+        action="store_true",
+        help="Swap touchscreen X/Y axes before mapping to the display",
+    )
+    parser.add_argument(
+        "--touch-invert-x",
+        action="store_true",
+        help="Invert touchscreen X before mapping to the display",
+    )
+    parser.add_argument(
+        "--touch-invert-y",
+        action="store_true",
+        help="Invert touchscreen Y before mapping to the display",
+    )
 
 
 @dataclass
@@ -166,6 +204,7 @@ def make_display(args) -> GhostDisplay:
         normal_assets=args.display_normal_assets or args.display_backend == "fbdev",
         ui_scale=ui_scale,
         asset_scale=asset_scale,
+        touch_ui=args.touch_ui or args.display_backend == "fbdev",
     )
 
 
@@ -717,6 +756,151 @@ class JoystickReader:
         self._buttons.clear()
 
 
+class TouchReader:
+    """Reads Linux evdev touchscreen events without extra dependencies."""
+
+    EVENT_STRUCT = struct.Struct("llHHI")
+    EVIOCGNAME = 0x81004506
+    EVIOCGABS_BASE = 0x80184540
+    EV_ABS = 0x03
+    EV_KEY = 0x01
+    EV_SYN = 0x00
+    ABS_X = 0x00
+    ABS_Y = 0x01
+    ABS_PRESSURE = 0x18
+    BTN_TOUCH = 0x14A
+
+    def __init__(
+        self,
+        device: str = "auto",
+        width: int = 480,
+        height: int = 320,
+        swap_xy: bool = False,
+        invert_x: bool = False,
+        invert_y: bool = False,
+    ):
+        self.device = device
+        self.width = width
+        self.height = height
+        self.swap_xy = swap_xy
+        self.invert_x = invert_x
+        self.invert_y = invert_y
+        self._fd = None
+        self._x = 0
+        self._y = 0
+        self._down = False
+        self._last_down = False
+        self._xmin = 0
+        self._xmax = max(1, width - 1)
+        self._ymin = 0
+        self._ymax = max(1, height - 1)
+
+    def start(self):
+        path = self._resolve_device()
+        if not path:
+            print("  Touch not available: no touchscreen event device found")
+            return
+        try:
+            self._fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            self.device = path
+            self._xmin, self._xmax = self._abs_range(self.ABS_X, self._xmax)
+            self._ymin, self._ymax = self._abs_range(self.ABS_Y, self._ymax)
+            print(f"  Touch: using {path}")
+        except Exception as e:
+            print(f"  Touch not available ({path}): {e}")
+            self._fd = None
+
+    def stop(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def get_event(self) -> Optional[tuple[str, int, int]]:
+        if self._fd is None:
+            return None
+        event = None
+        while True:
+            try:
+                data = os.read(self._fd, self.EVENT_STRUCT.size)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if len(data) < self.EVENT_STRUCT.size:
+                break
+            _, _, ev_type, code, value = self.EVENT_STRUCT.unpack(data)
+            if ev_type == self.EV_ABS:
+                if code == self.ABS_X:
+                    self._x = value
+                elif code == self.ABS_Y:
+                    self._y = value
+                elif code == self.ABS_PRESSURE:
+                    self._down = value > 0
+            elif ev_type == self.EV_KEY and code == self.BTN_TOUCH:
+                self._down = value != 0
+            elif ev_type == self.EV_SYN:
+                x, y = self._map_xy(self._x, self._y)
+                if self._down and not self._last_down:
+                    event = ("down", x, y)
+                elif self._down:
+                    event = ("drag", x, y)
+                elif self._last_down:
+                    event = ("up", x, y)
+                self._last_down = self._down
+        return event
+
+    def _resolve_device(self) -> Optional[str]:
+        if self.device != "auto":
+            return self.device
+        for path in glob.glob("/dev/input/event*"):
+            name = self._device_name(path).lower()
+            if any(token in name for token in ("touch", "xpt2046", "ads7846", "goodix")):
+                return path
+        events = sorted(glob.glob("/dev/input/event*"))
+        return events[0] if events else None
+
+    def _device_name(self, path: str) -> str:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                buf = bytearray(256)
+                fcntl.ioctl(fd, self.EVIOCGNAME, buf)
+                return bytes(buf).split(b"\0", 1)[0].decode(errors="ignore")
+            finally:
+                os.close(fd)
+        except OSError:
+            return ""
+
+    def _abs_range(self, code: int, fallback_max: int) -> tuple[int, int]:
+        if self._fd is None:
+            return 0, fallback_max
+        try:
+            buf = bytearray(24)
+            fcntl.ioctl(self._fd, self.EVIOCGABS_BASE + code, buf)
+            value, minimum, maximum, fuzz, flat, resolution = struct.unpack("iiiiii", buf)
+            if maximum > minimum:
+                return minimum, maximum
+        except OSError:
+            pass
+        return 0, fallback_max
+
+    def _map_xy(self, raw_x: int, raw_y: int) -> tuple[int, int]:
+        x = (raw_x - self._xmin) / max(1, self._xmax - self._xmin)
+        y = (raw_y - self._ymin) / max(1, self._ymax - self._ymin)
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        if self.swap_xy:
+            x, y = y, x
+        if self.invert_x:
+            x = 1.0 - x
+        if self.invert_y:
+            y = 1.0 - y
+        return int(x * (self.width - 1)), int(y * (self.height - 1))
+
+
 # -- main --
 
 def main():
@@ -730,6 +914,10 @@ def main():
     parser.add_argument(
         "--output-device", type=int, default=None,
         help="Audio output device index for synth (use --list-devices)",
+    )
+    parser.add_argument(
+        "--output-device-name", type=str, default=None,
+        help="Audio output device name substring, e.g. Headphones or bcm2835",
     )
     parser.add_argument(
         "--conf", type=float, default=1.0,
@@ -771,6 +959,12 @@ def main():
     if args.list_devices:
         print(sd.query_devices())
         sys.exit(0)
+
+    try:
+        output_device = resolve_output_device(sd, args.output_device, args.output_device_name)
+    except RuntimeError as e:
+        print(e)
+        sys.exit(1)
 
     # queues
     audio_q: queue.Queue = queue.Queue(maxsize=64)
@@ -815,7 +1009,7 @@ def main():
                 channels=1,
                 blocksize=1024,
                 dtype="float32",
-                device=args.output_device,
+                device=output_device,
                 callback=output_callback,
             )
             out_stream.start()
@@ -891,9 +1085,102 @@ def main():
     edit_cursor = [0]  # 0=tens, 1=ones, 2=tenths
     EDIT_STEPS = [100, 10, 1]  # increment per cursor position (in tenths)
 
+    def apply_slider(control: str, y: int):
+        track_top = lcd.roll_top + 108
+        track_bottom = lcd.height - 16
+        t = 1.0 - ((y - track_top) / max(1, track_bottom - track_top))
+        t = max(0.0, min(1.0, t))
+        if control == "conf":
+            pipeline.conf_th = 1.0 + t * (25.0 - 1.0)
+        elif control == "gate":
+            pipeline.rms_th = 0.001 + t * (0.1 - 0.001)
+        elif control == "freq":
+            mhz = 87.5 + t * (108.0 - 87.5)
+            edit_tenths[0] = int(round(mhz * 10))
+            new_freq = tenths_to_freq(edit_tenths[0])
+            lcd.fm_freq = new_freq
+            if not is_paused[0]:
+                fm.set_freq(new_freq)
+            else:
+                fm.freq = new_freq
+
+    def apply_control(key: str) -> bool:
+        nonlocal muted
+        if key == 'q':
+            return False
+        elif key == 'e':
+            edit_mode[0] = True
+            edit_tenths[0] = freq_to_tenths(fm.freq)
+            edit_cursor[0] = 2
+            lcd.edit_mode = True
+            lcd.edit_freq_str = tenths_to_freq(edit_tenths[0]).rstrip('M')
+            lcd.edit_cursor = edit_cursor[0]
+            print(f"\r  ** EDIT MODE — use joystick to change freq **         ")
+        elif key == 'w':
+            pipeline.conf_th = min(25.0, pipeline.conf_th + 0.5)
+        elif key == 's':
+            pipeline.conf_th = max(1.0, pipeline.conf_th - 0.5)
+        elif key == 'd':
+            pipeline.rms_th = min(0.1, pipeline.rms_th + 0.002)
+        elif key == 'a':
+            pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
+        elif key == 'r':
+            radio_mode[0] = not radio_mode[0]
+            radio_buf[0] = np.zeros(0, dtype=np.float32)
+            while not radio_q.empty():
+                try:
+                    radio_q.get_nowait()
+                except queue.Empty:
+                    break
+        elif key == 'm':
+            muted = not muted
+            muted_ref[0] = muted
+            pipeline.synth_muted = muted
+            if synth:
+                synth.muted = muted
+        elif key == 'p':
+            is_paused[0] = not is_paused[0]
+            lcd.paused = is_paused[0]
+            if is_paused[0]:
+                fm.stop()
+                if synth:
+                    synth.set_pitch(0)
+                print("\r  ** PAUSED **                                          ")
+            else:
+                fm.start()
+                print(f"\r  ** RESUMED — FM {fm.freq} **                        ")
+        elif key == 'f':
+            current_preset[0] = (current_preset[0] + 1) % len(FM_PRESETS)
+            new_freq = FM_PRESETS[current_preset[0]]
+            lcd.fm_freq = new_freq
+            if not is_paused[0]:
+                fm.set_freq(new_freq)
+            else:
+                fm.freq = new_freq
+            print(f"\r  ** FM -> {new_freq} **                                  ")
+        elif key == 'x':
+            pipeline.conf_th = args.conf
+            pipeline.rms_th = args.rms
+            print(f"\r  ** RESET — conf {args.conf:.1f}  gate {args.rms:.3f} **       ")
+        elif key == 'Q':
+            if is_paused[0]:
+                print("\r  ** SHUTTING DOWN **                                   ")
+                return False
+        return True
+
     keys.start()
     if not args.no_joystick:
         joy.start()
+    touch = TouchReader(
+        device=args.touch_device,
+        width=args.display_width,
+        height=args.display_height,
+        swap_xy=args.touch_swap_xy,
+        invert_x=args.touch_invert_x,
+        invert_y=args.touch_invert_y,
+    )
+    if args.touch_ui or args.display_backend == "fbdev":
+        touch.start()
     lcd.start()
 
     try:
@@ -941,75 +1228,30 @@ def main():
                     continue
 
                 # ---- NORMAL MODE ----
-                if key == 'q':
+                if not apply_control(key):
                     break
-                elif key == 'e':
-                    # enter edit mode (hold joystick center 3s)
-                    edit_mode[0] = True
-                    edit_tenths[0] = freq_to_tenths(fm.freq)
-                    edit_cursor[0] = 2  # start on tenths digit (finest control)
-                    lcd.edit_mode = True
-                    lcd.edit_freq_str = tenths_to_freq(edit_tenths[0]).rstrip('M')
-                    lcd.edit_cursor = edit_cursor[0]
-                    print(f"\r  ** EDIT MODE — use joystick to change freq **         ")
-                elif key == 'w':
-                    pipeline.conf_th = min(25.0, pipeline.conf_th + 0.5)
-                elif key == 's':
-                    pipeline.conf_th = max(1.0, pipeline.conf_th - 0.5)
-                elif key == 'd':
-                    pipeline.rms_th = min(0.1, pipeline.rms_th + 0.002)
-                elif key == 'a':
-                    pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
-                elif key == 'r':
-                    radio_mode[0] = not radio_mode[0]
-                    # clear radio buffer on toggle for clean switch
-                    radio_buf[0] = np.zeros(0, dtype=np.float32)
-                    # drain radio queue
-                    while not radio_q.empty():
-                        try:
-                            radio_q.get_nowait()
-                        except queue.Empty:
-                            break
-                elif key == 'm':
-                    muted = not muted
-                    muted_ref[0] = muted
-                    pipeline.synth_muted = muted
-                    if synth:
-                        synth.muted = muted
-                elif key == 'p':
-                    # toggle pause
-                    is_paused[0] = not is_paused[0]
-                    lcd.paused = is_paused[0]
-                    if is_paused[0]:
-                        # pause: stop FM reader, silence synth
-                        fm.stop()
-                        if synth:
-                            synth.set_pitch(0)
-                        print("\r  ** PAUSED **                                          ")
-                    else:
-                        # unpause: start FM reader
-                        fm.start()
-                        print(f"\r  ** RESUMED — FM {fm.freq} **                        ")
-                elif key == 'f':
-                    # cycle FM preset
-                    current_preset[0] = (current_preset[0] + 1) % len(FM_PRESETS)
-                    new_freq = FM_PRESETS[current_preset[0]]
-                    lcd.fm_freq = new_freq
-                    if not is_paused[0]:
-                        fm.set_freq(new_freq)
-                    else:
-                        fm.freq = new_freq
-                    print(f"\r  ** FM -> {new_freq} **                                  ")
-                elif key == 'x':
-                    # reset conf and gate to defaults (joystick hold)
-                    pipeline.conf_th = args.conf
-                    pipeline.rms_th = args.rms
-                    print(f"\r  ** RESET — conf {args.conf:.1f}  gate {args.rms:.3f} **       ")
-                elif key == 'Q':
-                    # quit (hold KEY1 3s, only when paused)
-                    if is_paused[0]:
-                        print("\r  ** SHUTTING DOWN **                                   ")
+
+            touch_event = touch.get_event()
+            if touch_event:
+                ev_type, tx, ty = touch_event
+                hit = lcd.hit_test(tx, ty)
+                if hit == "control:back" and ev_type == "down":
+                    lcd.active_control = ""
+                elif hit and hit.startswith("control:") and ev_type == "down":
+                    lcd.active_control = hit.split(":", 1)[1]
+                elif hit in {"p", "m", "r", "f"} and ev_type == "down":
+                    if not apply_control(hit):
                         break
+                elif lcd.active_control and ev_type in {"down", "drag"}:
+                    apply_slider(lcd.active_control, ty)
+
+            lcd.conf_th = pipeline.conf_th
+            lcd.rms_th = pipeline.rms_th
+            lcd.fm_freq = fm.freq
+            lcd.freq_mhz = float(fm.freq.rstrip('Mm'))
+            lcd.mode = "RADIO" if radio_mode[0] else "GHOST"
+            lcd.muted = muted
+            lcd.paused = is_paused[0]
 
             # drain viz queue
             latest_vf = None
@@ -1039,8 +1281,6 @@ def main():
                 lcd.note_name = midi_to_name(vf.current_midi) if vf.current_midi > 0 else "--"
                 lcd.freq_hz = vf.current_f0
                 lcd.note_count = note_count
-                lcd.mode = "RADIO" if radio_mode[0] else "GHOST"
-                lcd.muted = muted
                 lcd.push_note(vf.current_midi)
 
                 line = (
@@ -1061,6 +1301,7 @@ def main():
     finally:
         keys.stop()
         joy.stop()
+        touch.stop()
         lcd.stop()
         shutdown()
         pipeline.stop()

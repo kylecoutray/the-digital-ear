@@ -101,7 +101,7 @@ git switch matt-gift
 Install system packages:
 
 ```bash
-sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil fonts-dejavu-core
+sudo apt install -y python3-venv python3-pip python3-numpy python3-pil python3-psutil fonts-dejavu-core libportaudio2
 ```
 
 Create the venv:
@@ -115,6 +115,14 @@ Install runtime Python dependencies:
 ```bash
 ./venv/bin/pip install sounddevice gpiozero lgpio
 ```
+
+Allow the service user to read touchscreen events:
+
+```bash
+sudo usermod -aG input ghostfm
+```
+
+Log out and back in after changing groups.
 
 ## 5. Run The Display Test
 
@@ -169,6 +177,53 @@ If orientation is correct but colors look wrong, try the alternate RGB565 byte o
 
 ## 6. Enable Autostart
 
+## 6. Touch Controls And Aux Audio
+
+The MHS35 touchscreen should appear as a Linux input device after the LCD-show driver install:
+
+```bash
+cat /proc/bus/input/devices
+ls -l /dev/input/event*
+```
+
+GhostFM auto-detects common touchscreen names. If touch coordinates are flipped, rerun with one or more calibration flags:
+
+```bash
+--touch-swap-xy
+--touch-invert-x
+--touch-invert-y
+```
+
+The on-screen controls are:
+
+- `PLAY/PAUSE`: starts or stops FM capture.
+- `MUTE`: toggles synth output.
+- `GHOST/RADIO`: toggles synthesized melody vs raw radio passthrough.
+- `PRESET`: cycles station presets.
+- `CONF`, `GATE`, `FREQ`: opens a vertical slider; tap `BACK` to return.
+
+For the built-in Raspberry Pi aux/headphone jack:
+
+```bash
+./venv/bin/python ghost_fm.py --list-devices
+```
+
+Look for an output named something like `Headphones`, `bcm2835`, or `Built-in Audio`, then run with either a numeric index:
+
+```bash
+./venv/bin/python ghost_fm.py --output-device <index>
+```
+
+or a name substring:
+
+```bash
+./venv/bin/python ghost_fm.py --output-device-name Headphones
+```
+
+If the Pi routes audio somewhere else, use `sudo raspi-config`, go to audio/output settings, and force the headphone/3.5mm output.
+
+## 7. Enable Autostart
+
 Only do this after the display test works.
 
 ```bash
@@ -193,4 +248,4 @@ sudo systemctl disable ghostfm
 
 ## Current Scope
 
-This branch only adapts GhostFM rendering for the Pi 4 MHS35 framebuffer display. It intentionally does not implement touchscreen controls or new UI buttons yet.
+This branch adapts GhostFM for the Pi 4 MHS35 framebuffer display, adds a touchscreen control rail, and supports selecting the Pi aux/headphone audio output. The touch UI is intentionally simple: it exposes the existing GhostFM controls and sliders without redesigning the whole experience yet.
