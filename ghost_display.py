@@ -684,6 +684,8 @@ class GhostDisplay:
         roll_bottom = self.height - 1
         px_per_sec = self.width / ROLL_SECONDS
 
+        draw.rectangle([0, self.roll_top, self.width, roll_bottom], fill=(5, 2, 8))
+
         def row_bounds(row: int) -> tuple[int, int]:
             y0 = self.roll_top + int(row * self.roll_height / NUM_KEYS)
             y1 = self.roll_top + int((row + 1) * self.roll_height / NUM_KEYS) - 1
@@ -695,7 +697,7 @@ class GhostDisplay:
             if midi % 12 == 0:
                 y, _ = row_bounds(i)
                 draw.line([(0, y), (self.width, y)], fill=(25, 15, 35), width=1)
-        draw.line([(0, roll_bottom), (self.width, roll_bottom)], fill=(25, 15, 35), width=1)
+        draw.line([(0, roll_bottom), (self.width, roll_bottom)], fill=FAINT, width=1)
 
         # draw completed notes (each has its own stamped color)
         for note in self._roll_notes:
