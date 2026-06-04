@@ -681,15 +681,21 @@ class GhostDisplay:
     def _draw_roll(self, draw: ImageDraw.Draw, img: Image.Image):
         """Draw the scrolling piano roll in the bottom half."""
         now = time.monotonic()
-        key_h = self.roll_height / NUM_KEYS
+        roll_bottom = self.height - 1
         px_per_sec = self.width / ROLL_SECONDS
+
+        def row_bounds(row: int) -> tuple[int, int]:
+            y0 = self.roll_top + int(row * self.roll_height / NUM_KEYS)
+            y1 = self.roll_top + int((row + 1) * self.roll_height / NUM_KEYS) - 1
+            return y0, min(y1, roll_bottom)
 
         # dim octave grid lines
         for i in range(NUM_KEYS):
             midi = MIDI_HI - 1 - i
             if midi % 12 == 0:
-                y = self.roll_top + int(i * key_h)
+                y, _ = row_bounds(i)
                 draw.line([(0, y), (self.width, y)], fill=(25, 15, 35), width=1)
+        draw.line([(0, roll_bottom), (self.width, roll_bottom)], fill=(25, 15, 35), width=1)
 
         # draw completed notes (each has its own stamped color)
         for note in self._roll_notes:
@@ -703,8 +709,10 @@ class GhostDisplay:
                 continue
 
             row = MIDI_HI - 1 - note.midi
-            y = self.roll_top + int(row * key_h) + 1
-            h = max(int(key_h) - 2, 1)
+            y0, y1 = row_bounds(row)
+            if y1 - y0 >= 3:
+                y0 += 1
+                y1 -= 1
 
             color = note.color
 
@@ -714,7 +722,7 @@ class GhostDisplay:
                 t = min((age - 2.0) / 3.0, 0.85)
                 color = _lerp_color(color, (15, 10, 20), t)
 
-            draw.rectangle([x_start, y, x_end, y + h], fill=color)
+            draw.rectangle([x_start, y0, x_end, y1], fill=color)
 
         # draw live note (extends to right edge, uses current live color)
         if self._live_midi > 0 and MIDI_LO <= self._live_midi < MIDI_HI:
@@ -722,10 +730,12 @@ class GhostDisplay:
             x_start = max(0, x_start)
 
             row = MIDI_HI - 1 - self._live_midi
-            y = self.roll_top + int(row * key_h) + 1
-            h = max(int(key_h) - 2, 1)
+            y0, y1 = row_bounds(row)
+            if y1 - y0 >= 3:
+                y0 += 1
+                y1 -= 1
 
-            draw.rectangle([x_start, y, self.width, y + h], fill=self._live_color)
+            draw.rectangle([x_start, y0, self.width, y1], fill=self._live_color)
 
         # prune old notes
         cutoff = now - ROLL_SECONDS * 2
