@@ -801,6 +801,7 @@ class TouchReader:
         self._abs_dirty = False
         self._coord_active = False
         self._last_coord_emit = 0.0
+        self._coord_timeout = 0.25
         self._xmin = 0
         self._xmax = max(1, width - 1)
         self._ymin = 0
@@ -839,6 +840,7 @@ class TouchReader:
         if self._fd is None:
             return None
         event = None
+        saw_data = False
         while True:
             try:
                 data = os.read(self._fd, self.EVENT_STRUCT.size)
@@ -848,6 +850,7 @@ class TouchReader:
                 break
             if len(data) < self.EVENT_STRUCT.size:
                 break
+            saw_data = True
             _, _, ev_type, code, value = self.EVENT_STRUCT.unpack(data)
             if ev_type == self.EV_ABS:
                 if code == self.ABS_X:
@@ -879,6 +882,12 @@ class TouchReader:
                         self._last_coord_emit = now
                     self._abs_dirty = False
                 self._last_down = self._down
+        if event is None and not saw_data and self._coord_active:
+            now = time.monotonic()
+            if now - self._last_coord_emit >= self._coord_timeout:
+                x, y = self._map_xy(self._x, self._y)
+                self._coord_active = False
+                event = ("up", x, y)
         return event
 
     def _resolve_device(self) -> Optional[str]:
@@ -1261,7 +1270,7 @@ def main():
             if touch_event:
                 ev_type, tx, ty = touch_event
                 hit = lcd.hit_test(tx, ty)
-                if args.touch_debug and ev_type in {"down", "drag"}:
+                if args.touch_debug and ev_type in {"down", "up"}:
                     print(f"\r  TOUCH {ev_type} x={tx:3d} y={ty:3d} hit={hit}                    ")
                 if hit == "control:back" and ev_type == "down":
                     lcd.active_control = ""
