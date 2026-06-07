@@ -875,19 +875,18 @@ class TouchReader:
                     event = ("up", x, y)
                 elif self._abs_dirty:
                     now = time.monotonic()
-                    if now - self._last_coord_emit >= 0.08:
-                        event_type = "drag" if self._coord_active else "down"
-                        event = (event_type, x, y)
+                    if not self._coord_active:
+                        event = ("down", x, y)
                         self._coord_active = True
+                        self._last_coord_emit = now
+                    else:
                         self._last_coord_emit = now
                     self._abs_dirty = False
                 self._last_down = self._down
         if event is None and not saw_data and self._coord_active:
             now = time.monotonic()
             if now - self._last_coord_emit >= self._coord_timeout:
-                x, y = self._map_xy(self._x, self._y)
                 self._coord_active = False
-                event = ("up", x, y)
         return event
 
     def _resolve_device(self) -> Optional[str]:
