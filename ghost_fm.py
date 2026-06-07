@@ -798,6 +798,8 @@ class TouchReader:
         self._down = False
         self._last_down = False
         self._saw_touch_key = False
+        self._have_xy = False
+        self._pending_release = False
         self._abs_dirty = False
         self._coord_active = False
         self._last_coord_emit = 0.0
@@ -856,15 +858,19 @@ class TouchReader:
                 if code == self.ABS_X:
                     self._x = value
                     self._abs_dirty = True
+                    self._have_xy = True
                 elif code == self.ABS_Y:
                     self._y = value
                     self._abs_dirty = True
+                    self._have_xy = True
                 elif code == self.ABS_PRESSURE:
                     self._down = value > 0
                     self._saw_touch_key = True
             elif ev_type == self.EV_KEY and code == self.BTN_TOUCH:
                 self._down = value != 0
                 self._saw_touch_key = True
+                if value == 0:
+                    self._pending_release = True
             elif ev_type == self.EV_SYN:
                 x, y = self._map_xy(self._x, self._y)
                 if self._saw_touch_key and self._down and not self._last_down:
@@ -872,6 +878,8 @@ class TouchReader:
                 elif self._saw_touch_key and self._down:
                     event = ("drag", x, y)
                 elif self._saw_touch_key and self._last_down:
+                    event = ("up", x, y)
+                elif self._pending_release and self._have_xy:
                     event = ("up", x, y)
                 elif self._abs_dirty:
                     now = time.monotonic()
@@ -883,6 +891,7 @@ class TouchReader:
                         self._last_coord_emit = now
                     self._abs_dirty = False
                 self._last_down = self._down
+                self._pending_release = False
         if event is None and not saw_data and self._coord_active:
             now = time.monotonic()
             if now - self._last_coord_emit >= self._coord_timeout:
@@ -1341,7 +1350,7 @@ def main():
                 sys.stdout.flush()
                 last_print = now
 
-            time.sleep(0.05)
+            time.sleep(0.02)
 
     finally:
         keys.stop()
