@@ -241,11 +241,13 @@ Look for an output named something like `Headphones`, `bcm2835`, or `Built-in Au
 ./venv/bin/python ghost_fm.py --output-device <index>
 ```
 
-or a name substring:
+or a name substring. On this Pi, `2 bcm2835 Headphones: - (hw:1,0), ALSA (0 in, 8 out)` can be selected by name:
 
 ```bash
 ./venv/bin/python ghost_fm.py --output-device-name Headphones
 ```
+
+The included `ghostfm.service` uses `--output-device-name Headphones` so autostart prefers the built-in aux/headphone jack.
 
 If the Pi routes audio somewhere else, use `sudo raspi-config`, go to audio/output settings, and force the headphone/3.5mm output.
 
