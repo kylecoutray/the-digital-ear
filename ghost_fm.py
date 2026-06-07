@@ -1216,6 +1216,7 @@ def main():
     if args.touch_ui or args.display_backend == "fbdev":
         touch.start()
     lcd.start()
+    touch_down_handled = [False]
 
     try:
         while not shutting_down.is_set():
@@ -1271,17 +1272,23 @@ def main():
                 hit = lcd.hit_test(tx, ty)
                 if args.touch_debug and ev_type in {"down", "up"}:
                     print(f"\r  TOUCH {ev_type} x={tx:3d} y={ty:3d} hit={hit}                    ")
-                if hit == "control:back" and ev_type == "down":
-                    lcd.active_control = ""
-                elif hit == "control:minus" and ev_type == "down":
-                    nudge_control(lcd.active_control, -1)
-                elif hit == "control:plus" and ev_type == "down":
-                    nudge_control(lcd.active_control, 1)
-                elif hit and hit.startswith("control:") and ev_type == "down":
-                    lcd.active_control = hit.split(":", 1)[1]
-                elif hit in {"p", "m", "r", "f"} and ev_type == "down":
-                    if not apply_control(hit):
-                        break
+
+                should_apply_touch = ev_type == "down" or (ev_type == "up" and not touch_down_handled[0])
+                if should_apply_touch:
+                    touch_down_handled[0] = ev_type == "down"
+                    if hit == "control:back":
+                        lcd.active_control = ""
+                    elif hit == "control:minus":
+                        nudge_control(lcd.active_control, -1)
+                    elif hit == "control:plus":
+                        nudge_control(lcd.active_control, 1)
+                    elif hit and hit.startswith("control:"):
+                        lcd.active_control = hit.split(":", 1)[1]
+                    elif hit in {"p", "m", "r", "f"}:
+                        if not apply_control(hit):
+                            break
+                if ev_type == "up":
+                    touch_down_handled[0] = False
 
             lcd.conf_th = pipeline.conf_th
             lcd.rms_th = pipeline.rms_th
