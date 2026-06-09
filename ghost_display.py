@@ -343,6 +343,7 @@ class GhostDisplay:
         self.fm_freq: str = "89.9M"
         self.mode: str = "GHOST"
         self.muted: bool = False
+        self.volume: float = 0.8
         self.current_midi: int = 0
         self.paused: bool = True   # starts paused (idle screen)
         self.edit_mode: bool = False
@@ -795,6 +796,7 @@ class GhostDisplay:
             ("control:conf", "CONF"),
             ("control:gate", "GATE"),
             ("control:freq", "FREQ"),
+            ("control:volume", "VOL"),
         ]
         pad = 6
         cols = 4
@@ -802,12 +804,18 @@ class GhostDisplay:
         btn_w = int((x1 - x0 - pad * (cols + 1)) / cols)
         btn_h = int((y1 - y0 - pad * (rows + 1)) / rows)
         font_btn = _load_font(max(7, int(11 * self.ui_scale)))
+        cog_size = max(30, int(28 * self.ui_scale))
+        cog_pad = max(6, int(6 * self.ui_scale))
+        cog_left = self.width - cog_pad - cog_size
         for idx, (name, label) in enumerate(labels):
             col = idx % cols
             row = idx // cols
             bx0 = x0 + pad + col * (btn_w + pad)
             by0 = y0 + pad + row * (btn_h + pad)
-            rect = (bx0, by0, bx0 + btn_w, by0 + btn_h)
+            bx1 = bx0 + btn_w
+            if name == "control:volume":
+                bx1 = min(bx1, cog_left - pad)
+            rect = (bx0, by0, bx1, by0 + btn_h)
             self._touch_hitboxes.append((name, rect))
             fill = (28, 8, 42)
             if name == "m" and self.muted:
@@ -858,10 +866,14 @@ class GhostDisplay:
             label = "GATE"
             value = self.rms_th
             value_text = f"{value:.3f}"
-        else:
+        elif self.active_control == "freq":
             label = "FREQ"
             value = self.freq_mhz
             value_text = f"{value:.1f}"
+        else:
+            label = "VOL"
+            value = self.volume
+            value_text = f"{int(round(value * 100))}%"
 
         label_x = back_rect[2] + pad * 2
         draw.text((label_x, y0 + pad + 2), label, fill=DIM, font=font_sm)
@@ -870,11 +882,14 @@ class GhostDisplay:
         gap = 8
         btn_top = y0 + pad
         btn_bottom = y1 - pad
+        cog_size = max(30, int(28 * self.ui_scale))
+        cog_pad = max(6, int(6 * self.ui_scale))
+        btn_right = self.width - cog_pad - cog_size - pad
         btn_area_w = max(160, int((x1 - x0) * 0.42))
-        btn_left = x1 - pad - btn_area_w
+        btn_left = btn_right - btn_area_w
         mid = btn_left + (btn_area_w // 2)
         minus_rect = (btn_left, btn_top, mid - gap // 2, btn_bottom)
-        plus_rect = (mid + gap // 2, btn_top, x1 - pad, btn_bottom)
+        plus_rect = (mid + gap // 2, btn_top, btn_right, btn_bottom)
         self._touch_hitboxes.append(("control:minus", minus_rect))
         self._touch_hitboxes.append(("control:plus", plus_rect))
         draw.rectangle(minus_rect, fill=(28, 8, 42), outline=FAINT)

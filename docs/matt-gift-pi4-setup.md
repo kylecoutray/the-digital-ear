@@ -231,7 +231,9 @@ The touch UI behavior is:
 - `MUTE`: toggles synth output.
 - `GHOST/RADIO/BOTH`: cycles synthesized melody, raw radio passthrough, or a mix of both.
 - `PRESET`: cycles station presets.
-- `CONF`, `GATE`, `FREQ`: opens large `-` / `+` controls; tap `BACK` to return.
+- `CONF`, `GATE`, `FREQ`, `VOL`: opens large `-` / `+` controls; tap `BACK` to return.
+
+Keyboard volume controls are `[` for down and `]` for up.
 
 For the built-in Raspberry Pi aux/headphone jack:
 

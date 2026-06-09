@@ -13,8 +13,9 @@ pipeline, and re-synthesizes detected melody as sine tones.
 Interactive controls (while running):
   w/s     confidence up/down
   a/d     noise gate up/down
+  [/ ]    volume down/up
   m       mute/unmute synth
-  r       toggle radio passthrough (hear raw FM audio)
+  r       cycle output mode (ghost/radio/both)
   q       quit
 """
 from __future__ import annotations
@@ -1040,6 +1041,7 @@ def main():
     output_mode = ["GHOST"]  # list so closure can mutate
     radio_buf = [np.zeros(1024, dtype=np.float32)]  # playback buffer
     muted_ref = [False]  # list so audio callback can read it
+    volume = [0.8]
 
     if synth:
         def read_radio_frames(frames: int) -> np.ndarray:
@@ -1065,11 +1067,12 @@ def main():
                 outdata[:, 0] = 0
                 return
             if output_mode[0] == "RADIO":
-                outdata[:, 0] = read_radio_frames(frames) * 0.5
+                out = read_radio_frames(frames) * 0.5
             elif output_mode[0] == "BOTH":
-                outdata[:, 0] = (read_radio_frames(frames) * 0.35) + (synth.generate(frames) * 0.65)
+                out = (read_radio_frames(frames) * 0.35) + (synth.generate(frames) * 0.65)
             else:
-                outdata[:, 0] = synth.generate(frames)
+                out = synth.generate(frames)
+            outdata[:, 0] = np.clip(out * volume[0], -1.0, 1.0)
 
         try:
             out_stream = sd.OutputStream(
@@ -1133,7 +1136,8 @@ def main():
     print(f"  Tuned to FM {args.freq}  |  synth {'ON' if synth else 'OFF'}")
     print(f"  ──────────────────────────────────────────────")
     print(f"  w/s  confidence ↑↓    a/d  noise gate ↑↓")
-    print(f"  r    radio passthrough    m    mute synth")
+    print(f"  [/]  volume ↓↑        r    ghost/radio/both")
+    print(f"  m    mute synth")
     print(f"  e    edit frequency       f    cycle preset")
     print(f"  q    quit")
     print(f"  ──────────────────────────────────────────────\n")
@@ -1167,6 +1171,8 @@ def main():
                 fm.set_freq(new_freq)
             else:
                 fm.freq = new_freq
+        elif control == "volume":
+            volume[0] = max(0.0, min(1.0, volume[0] + direction * 0.05))
 
     def apply_control(key: str) -> bool:
         nonlocal muted
@@ -1188,6 +1194,12 @@ def main():
             pipeline.rms_th = min(0.1, pipeline.rms_th + 0.002)
         elif key == 'a':
             pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
+        elif key == ']':
+            nudge_control("volume", 1)
+            print(f"\r  ** VOLUME {int(round(volume[0] * 100)):3d}% **                    ")
+        elif key == '[':
+            nudge_control("volume", -1)
+            print(f"\r  ** VOLUME {int(round(volume[0] * 100)):3d}% **                    ")
         elif key == 'r':
             current_mode = OUTPUT_MODES.index(output_mode[0])
             output_mode[0] = OUTPUT_MODES[(current_mode + 1) % len(OUTPUT_MODES)]
@@ -1333,6 +1345,7 @@ def main():
             lcd.freq_mhz = float(fm.freq.rstrip('Mm'))
             lcd.mode = output_mode[0]
             lcd.muted = muted
+            lcd.volume = volume[0]
             lcd.paused = is_paused[0]
 
             # drain viz queue
@@ -1370,6 +1383,7 @@ def main():
                     f"  |  {note_str}"
                     f"  |  conf {pipeline.conf_th:4.1f}"
                     f"  |  gate {pipeline.rms_th:.3f}"
+                    f"  |  vol {int(round(volume[0] * 100)):3d}%"
                     f"  |  {note_count:4d} notes"
                     f"  |  {vf.time_sec:6.1f}s"
                     f"{mode_str}{mute_str}    "
