@@ -540,6 +540,7 @@ class FMReader:
         self.running = False
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
 
     def _build_cmd(self):
         cmd = [
@@ -559,12 +560,13 @@ class FMReader:
 
     def start(self):
         cmd = self._build_cmd()
+        print(f"\n  Starting rtl_fm: {' '.join(cmd)}")
 
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
             print("ERROR: rtl_fm not found. Install with: sudo apt install rtl-sdr")
@@ -573,6 +575,16 @@ class FMReader:
         self.running = True
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
+        self._stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
+        self._stderr_thread.start()
+
+    def _stderr_loop(self):
+        if not self._proc or not self._proc.stderr:
+            return
+        for raw_line in iter(self._proc.stderr.readline, b""):
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if line:
+                print(f"\n  rtl_fm: {line}")
 
     def _read_loop(self):
         bytes_per_block = self.block_size * 2  # 16-bit = 2 bytes/sample
@@ -602,6 +614,10 @@ class FMReader:
                     self.radio_q.put_nowait(samples.copy())
                 except queue.Full:
                     pass
+
+        if self.running:
+            code = self._proc.poll() if self._proc else None
+            print(f"\n  rtl_fm stopped unexpectedly" + (f" with exit code {code}" if code is not None else ""))
 
     def stop(self):
         self.running = False
