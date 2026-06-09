@@ -697,8 +697,8 @@ class GhostDisplay:
         self._draw_roll(draw, img)
         if self.touch_ui:
             self._touch_hitboxes = []
-            self._draw_settings_button(draw)
             self._draw_touch_controls(draw, font_sm, font_md, font_lg)
+            self._draw_settings_button(draw)
 
         return img
 
@@ -783,7 +783,8 @@ class GhostDisplay:
         draw.line([(x0, y0), (x1, y0)], fill=FAINT, width=1)
 
         if self.active_control:
-            self._draw_slider_control(draw, x0, y0, x1, y1, font_sm, font_md, font_lg)
+            font_btn = _load_font(max(7, int(11 * self.ui_scale)))
+            self._draw_slider_control(draw, x0, y0, x1, y1, font_btn, font_md, font_lg)
             return
 
         labels = [
@@ -800,6 +801,7 @@ class GhostDisplay:
         rows = 2
         btn_w = int((x1 - x0 - pad * (cols + 1)) / cols)
         btn_h = int((y1 - y0 - pad * (rows + 1)) / rows)
+        font_btn = _load_font(max(7, int(11 * self.ui_scale)))
         for idx, (name, label) in enumerate(labels):
             col = idx % cols
             row = idx // cols
@@ -813,12 +815,12 @@ class GhostDisplay:
             elif name == "r" and self.mode == "RADIO":
                 fill = (24, 38, 60)
             draw.rectangle(rect, fill=fill, outline=FAINT)
-            self._center_text(draw, label, rect, font_sm, WHITE)
+            self._center_text(draw, label, rect, font_btn, WHITE)
 
     def _draw_settings_button(self, draw: ImageDraw.Draw):
         size = max(30, int(28 * self.ui_scale))
         pad = max(6, int(6 * self.ui_scale))
-        rect = (self.width - pad - size, pad, self.width - pad, pad + size)
+        rect = (self.width - pad - size, self.height - pad - size, self.width - pad, self.height - pad)
         self._touch_hitboxes.append(("settings", rect))
 
         fill = (30, 10, 44) if self.settings_open else (16, 5, 24)
@@ -840,7 +842,8 @@ class GhostDisplay:
 
     def _draw_slider_control(self, draw, x0, y0, x1, y1, font_sm, font_md, font_lg):
         pad = 8
-        back_rect = (x0 + pad, y0 + pad, x1 - pad, y0 + 34)
+        back_w = max(70, int((x1 - x0) * 0.16))
+        back_rect = (x0 + pad, y0 + pad, x0 + pad + back_w, y0 + 40)
         self._touch_hitboxes.append(("control:back", back_rect))
         draw.rectangle(back_rect, fill=(28, 8, 42), outline=FAINT)
         self._center_text(draw, "BACK", back_rect, font_sm, WHITE)
@@ -858,14 +861,17 @@ class GhostDisplay:
             value = self.freq_mhz
             value_text = f"{value:.1f}"
 
-        draw.text((x0 + pad, y0 + 44), label, fill=DIM, font=font_sm)
-        draw.text((x0 + pad, y0 + 66), value_text, fill=BRIGHT, font=font_lg)
+        label_x = back_rect[2] + pad * 2
+        draw.text((label_x, y0 + pad + 2), label, fill=DIM, font=font_sm)
+        draw.text((label_x, y0 + pad + 28), value_text, fill=BRIGHT, font=font_lg)
 
         gap = 8
-        btn_top = y0 + 112
-        btn_bottom = y1 - 16
-        mid = x0 + ((x1 - x0) // 2)
-        minus_rect = (x0 + pad, btn_top, mid - gap // 2, btn_bottom)
+        btn_top = y0 + pad
+        btn_bottom = y1 - pad
+        btn_area_w = max(160, int((x1 - x0) * 0.42))
+        btn_left = x1 - pad - btn_area_w
+        mid = btn_left + (btn_area_w // 2)
+        minus_rect = (btn_left, btn_top, mid - gap // 2, btn_bottom)
         plus_rect = (mid + gap // 2, btn_top, x1 - pad, btn_bottom)
         self._touch_hitboxes.append(("control:minus", minus_rect))
         self._touch_hitboxes.append(("control:plus", plus_rect))
