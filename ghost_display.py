@@ -814,6 +814,8 @@ class GhostDisplay:
                 fill = (70, 8, 18)
             elif name == "r" and self.mode == "RADIO":
                 fill = (24, 38, 60)
+            elif name == "r" and self.mode == "BOTH":
+                fill = (44, 28, 10)
             draw.rectangle(rect, fill=fill, outline=FAINT)
             self._center_text(draw, label, rect, font_btn, WHITE)
 

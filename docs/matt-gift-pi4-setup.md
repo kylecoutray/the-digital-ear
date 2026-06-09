@@ -229,7 +229,7 @@ The touch UI behavior is:
 - Gear button: opens or closes the bottom control overlay.
 - `PLAY/PAUSE`: stops FM capture and returns to the idle screen, or resumes from the overlay.
 - `MUTE`: toggles synth output.
-- `GHOST/RADIO`: toggles synthesized melody vs raw radio passthrough.
+- `GHOST/RADIO/BOTH`: cycles synthesized melody, raw radio passthrough, or a mix of both.
 - `PRESET`: cycles station presets.
 - `CONF`, `GATE`, `FREQ`: opens large `-` / `+` controls; tap `BACK` to return.
 

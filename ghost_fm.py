@@ -1020,32 +1020,38 @@ def main():
     # synth
     synth = None if args.no_synth else GhostSynth()
     out_stream = None
-    radio_mode = [False]  # list so closure can mutate
+    OUTPUT_MODES = ["GHOST", "RADIO", "BOTH"]
+    output_mode = ["GHOST"]  # list so closure can mutate
     radio_buf = [np.zeros(1024, dtype=np.float32)]  # playback buffer
     muted_ref = [False]  # list so audio callback can read it
 
     if synth:
+        def read_radio_frames(frames: int) -> np.ndarray:
+            while True:
+                try:
+                    chunk = radio_q.get_nowait()
+                    radio_buf[0] = np.concatenate([radio_buf[0], chunk])
+                except queue.Empty:
+                    break
+
+            buf = radio_buf[0]
+            out = np.zeros(frames, dtype=np.float32)
+            if len(buf) >= frames:
+                out[:] = buf[:frames]
+                radio_buf[0] = buf[frames:]
+            else:
+                out[:len(buf)] = buf
+                radio_buf[0] = np.zeros(0, dtype=np.float32)
+            return out
+
         def output_callback(outdata, frames, time_info, status):
             if muted_ref[0]:
                 outdata[:, 0] = 0
                 return
-            if radio_mode[0]:
-                # drain queue into buffer first
-                while True:
-                    try:
-                        chunk = radio_q.get_nowait()
-                        radio_buf[0] = np.concatenate([radio_buf[0], chunk])
-                    except queue.Empty:
-                        break
-                # play from buffer
-                buf = radio_buf[0]
-                if len(buf) >= frames:
-                    outdata[:, 0] = buf[:frames] * 0.5
-                    radio_buf[0] = buf[frames:]
-                else:
-                    outdata[:len(buf), 0] = buf * 0.5
-                    outdata[len(buf):, 0] = 0
-                    radio_buf[0] = np.zeros(0, dtype=np.float32)
+            if output_mode[0] == "RADIO":
+                outdata[:, 0] = read_radio_frames(frames) * 0.5
+            elif output_mode[0] == "BOTH":
+                outdata[:, 0] = (read_radio_frames(frames) * 0.35) + (synth.generate(frames) * 0.65)
             else:
                 outdata[:, 0] = synth.generate(frames)
 
@@ -1167,7 +1173,8 @@ def main():
         elif key == 'a':
             pipeline.rms_th = max(0.001, pipeline.rms_th - 0.002)
         elif key == 'r':
-            radio_mode[0] = not radio_mode[0]
+            current_mode = OUTPUT_MODES.index(output_mode[0])
+            output_mode[0] = OUTPUT_MODES[(current_mode + 1) % len(OUTPUT_MODES)]
             radio_buf[0] = np.zeros(0, dtype=np.float32)
             while not radio_q.empty():
                 try:
@@ -1308,7 +1315,7 @@ def main():
             lcd.rms_th = pipeline.rms_th
             lcd.fm_freq = fm.freq
             lcd.freq_mhz = float(fm.freq.rstrip('Mm'))
-            lcd.mode = "RADIO" if radio_mode[0] else "GHOST"
+            lcd.mode = output_mode[0]
             lcd.muted = muted
             lcd.paused = is_paused[0]
 
@@ -1332,7 +1339,7 @@ def main():
                     note_str = "  --    --.- Hz"
 
                 mute_str = " MUTED" if muted else ""
-                mode_str = " [RADIO]" if radio_mode[0] else " [GHOST]"
+                mode_str = f" [{output_mode[0]}]"
 
                 # update LCD display state
                 lcd.conf_th = pipeline.conf_th
