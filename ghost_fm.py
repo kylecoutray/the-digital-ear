@@ -1069,7 +1069,7 @@ def main():
             if output_mode[0] == "RADIO":
                 out = read_radio_frames(frames) * 0.5
             elif output_mode[0] == "BOTH":
-                out = (read_radio_frames(frames) * 0.35) + (synth.generate(frames) * 0.65)
+                out = (read_radio_frames(frames) * 0.5) + (synth.generate(frames) * 0.25)
             else:
                 out = synth.generate(frames)
             outdata[:, 0] = np.clip(out * volume[0], -1.0, 1.0)
