@@ -329,10 +329,10 @@ class GhostDisplay:
         self.ui_scale = ui_scale
         self.asset_scale = asset_scale
         self.touch_ui = touch_ui
-        self.control_panel_width = 150 if self.touch_ui and self.width >= 400 else 0
+        self.control_panel_width = 0
         self.roll_top = int(self.height * 0.52)
         self.roll_height = self.height - self.roll_top
-        self.roll_right = self.width - self.control_panel_width
+        self.roll_right = self.width
         self._touch_hitboxes: list[tuple[str, tuple[int, int, int, int]]] = []
         # shared state (written by main thread, read by display thread)
         self.conf_th: float = 1.0
@@ -349,6 +349,7 @@ class GhostDisplay:
         self.edit_freq_str: str = ""   # e.g. "89.5" (no M suffix)
         self.edit_cursor: int = 0      # 0=tens, 1=ones, 2=tenths
         self.active_control: str = ""
+        self.settings_open: bool = False
         self.freq_mhz: float = 89.9
 
         self._running = False
@@ -389,6 +390,8 @@ class GhostDisplay:
         self._bounce_dir_right: bool = True  # for horizontal flip
 
     def hit_test(self, x: int, y: int) -> Optional[str]:
+        if self.touch_ui and self.paused:
+            return "p"
         for name, (x0, y0, x1, y1) in reversed(self._touch_hitboxes):
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return name
@@ -514,6 +517,9 @@ class GhostDisplay:
 
     def _draw_idle(self) -> Image.Image:
         img = Image.new("RGB", (self.width, self.height), BLACK)
+        self._touch_hitboxes = []
+        self.settings_open = False
+        self.active_control = ""
 
         # draw centered logo
         if self._logo_idle_img:
@@ -566,13 +572,6 @@ class GhostDisplay:
             mask = sprite.split()[3]
             img.paste(ghost_layer.crop((gx, gy, gx + ghost_w, gy + ghost_h)),
                       (gx, gy), mask)
-
-        if self.touch_ui:
-            draw = ImageDraw.Draw(img)
-            font_lg = _load_font(max(10, int(20 * self.ui_scale)), bold=True)
-            font_md = _load_font(max(8, int(16 * self.ui_scale)))
-            font_sm = _load_font(max(7, int(13 * self.ui_scale)))
-            self._draw_touch_controls(draw, font_sm, font_md, font_lg)
 
         return img
 
@@ -691,12 +690,14 @@ class GhostDisplay:
         desired_roll_top = note_y + font_lg_size + tight_gap
         self.roll_top = min(max(int(self.height * 0.52), desired_roll_top), self.height - min_roll_height)
         self.roll_height = self.height - self.roll_top
-        self.roll_right = self.width - self.control_panel_width
+        self.roll_right = self.width
         draw.line([(margin, self.roll_top - 4), (self.width - margin, self.roll_top - 4)], fill=FAINT, width=1)
 
         # -- piano roll (bottom half) --
         self._draw_roll(draw, img)
         if self.touch_ui:
+            self._touch_hitboxes = []
+            self._draw_settings_button(draw)
             self._draw_touch_controls(draw, font_sm, font_md, font_lg)
 
         return img
@@ -769,15 +770,17 @@ class GhostDisplay:
             self._roll_notes.popleft()
 
     def _draw_touch_controls(self, draw: ImageDraw.Draw, font_sm, font_md, font_lg):
-        panel_w = self.control_panel_width or 150
-        x0 = self.width - panel_w
-        y0 = 0
+        if not self.settings_open and not self.active_control:
+            return
+
+        overlay_h = min(max(88, int(self.height * 0.32)), 112)
+        x0 = 0
+        y0 = self.height - overlay_h
         x1 = self.width - 1
         y1 = self.height - 1
-        self._touch_hitboxes = []
 
         draw.rectangle([x0, y0, x1, y1], fill=(12, 4, 18))
-        draw.line([(x0, y0), (x0, y1)], fill=FAINT, width=1)
+        draw.line([(x0, y0), (x1, y0)], fill=FAINT, width=1)
 
         if self.active_control:
             self._draw_slider_control(draw, x0, y0, x1, y1, font_sm, font_md, font_lg)
@@ -793,8 +796,8 @@ class GhostDisplay:
             ("control:freq", "FREQ"),
         ]
         pad = 6
-        cols = 2
-        rows = 4
+        cols = 4
+        rows = 2
         btn_w = int((x1 - x0 - pad * (cols + 1)) / cols)
         btn_h = int((y1 - y0 - pad * (rows + 1)) / rows)
         for idx, (name, label) in enumerate(labels):
@@ -811,6 +814,29 @@ class GhostDisplay:
                 fill = (24, 38, 60)
             draw.rectangle(rect, fill=fill, outline=FAINT)
             self._center_text(draw, label, rect, font_sm, WHITE)
+
+    def _draw_settings_button(self, draw: ImageDraw.Draw):
+        size = max(30, int(28 * self.ui_scale))
+        pad = max(6, int(6 * self.ui_scale))
+        rect = (self.width - pad - size, pad, self.width - pad, pad + size)
+        self._touch_hitboxes.append(("settings", rect))
+
+        fill = (30, 10, 44) if self.settings_open else (16, 5, 24)
+        draw.rectangle(rect, fill=fill, outline=FAINT)
+
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        outer = max(8, size // 3)
+        inner = max(3, size // 8)
+        for i in range(8):
+            angle = (math.pi * 2 * i) / 8
+            x_start = cx + int(math.cos(angle) * (outer - 3))
+            y_start = cy + int(math.sin(angle) * (outer - 3))
+            x_end = cx + int(math.cos(angle) * outer)
+            y_end = cy + int(math.sin(angle) * outer)
+            draw.line([(x_start, y_start), (x_end, y_end)], fill=WHITE, width=1)
+        draw.ellipse([cx - outer + 3, cy - outer + 3, cx + outer - 3, cy + outer - 3], outline=WHITE, width=2)
+        draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], fill=BLACK, outline=WHITE)
 
     def _draw_slider_control(self, draw, x0, y0, x1, y1, font_sm, font_md, font_lg):
         pad = 8

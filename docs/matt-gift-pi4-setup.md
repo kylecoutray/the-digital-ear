@@ -175,8 +175,6 @@ If orientation is correct but colors look wrong, try the alternate RGB565 byte o
   --no-joystick
 ```
 
-## 6. Enable Autostart
-
 ## 6. Touch Controls And Aux Audio
 
 The MHS35 touchscreen should appear as a Linux input device after the LCD-show driver install:
@@ -186,13 +184,14 @@ cat /proc/bus/input/devices
 ls -l /dev/input/event*
 ```
 
-GhostFM auto-detects common touchscreen names. If touch coordinates are flipped, rerun with one or more calibration flags:
+GhostFM auto-detects common touchscreen names. For this MHS35 unit, the working calibration is:
 
 ```bash
 --touch-swap-xy
 --touch-invert-x
---touch-invert-y
 ```
+
+If a replacement screen maps differently, also test `--touch-invert-y`.
 
 For calibration, run with debug enabled and tap the four corners plus the right-side buttons:
 
@@ -207,6 +206,8 @@ For calibration, run with debug enabled and tap the four corners plus the right-
   --display-ui-scale 1.5 \
   --display-asset-scale 1.5 \
   --touch-ui \
+  --touch-swap-xy \
+  --touch-invert-x \
   --touch-device /dev/input/event0 \
   --touch-debug \
   --no-joystick
@@ -221,9 +222,12 @@ Expected mapped corners are roughly:
 
 This display uses a resistive ADS7846/XPT2046-style touch panel, not a phone-style capacitive panel. Use the stylus or a firm fingernail press while testing. If debug prints only appear after unusually hard pressure, verify the screen is fully seated on the GPIO header and that nothing in the case is flexing the panel.
 
-The on-screen controls are:
+The touch UI behavior is:
 
-- `PLAY/PAUSE`: starts or stops FM capture.
+- Idle screen: tap anywhere to start FM capture.
+- Live screen: the main GhostFM UI uses the full display.
+- Gear button: opens or closes the bottom control overlay.
+- `PLAY/PAUSE`: stops FM capture and returns to the idle screen, or resumes from the overlay.
 - `MUTE`: toggles synth output.
 - `GHOST/RADIO`: toggles synthesized melody vs raw radio passthrough.
 - `PRESET`: cycles station presets.
@@ -251,9 +255,11 @@ The included `ghostfm.service` uses `--output-device-name Headphones` so autosta
 
 If the Pi routes audio somewhere else, use `sudo raspi-config`, go to audio/output settings, and force the headphone/3.5mm output.
 
-## 7. Enable Autostart
+## 7. Defer Autostart
 
-Only do this after the display test works.
+Do not enable autostart until the touchscreen UI, display orientation, audio output, and FM controls are finalized.
+
+When the build is ready for unattended boot, install the service:
 
 ```bash
 sudo cp ghostfm.service /etc/systemd/system/

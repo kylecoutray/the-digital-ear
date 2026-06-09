@@ -1183,6 +1183,8 @@ def main():
         elif key == 'p':
             is_paused[0] = not is_paused[0]
             lcd.paused = is_paused[0]
+            lcd.settings_open = False
+            lcd.active_control = ""
             if is_paused[0]:
                 fm.stop()
                 if synth:
@@ -1291,6 +1293,9 @@ def main():
                         nudge_control(lcd.active_control, -1)
                     elif hit == "control:plus":
                         nudge_control(lcd.active_control, 1)
+                    elif hit == "settings":
+                        lcd.settings_open = not lcd.settings_open
+                        lcd.active_control = ""
                     elif hit and hit.startswith("control:"):
                         lcd.active_control = hit.split(":", 1)[1]
                     elif hit in {"p", "m", "r", "f"}:
